@@ -77,9 +77,9 @@ Optional arguments:
   element stays separated.
 - Press `Ctrl+T` to toggle the translucent glass background. The choice is
   saved for the next launch.
-- The live rings icon stays in the Windows notification area instead of
-  adding a taskbar button. Click it to show the window or right-click for
-  controls.
+- The widget has a normal Windows taskbar button and also keeps a live rings
+  icon in the notification area. Click either one to show the window or
+  right-click the notification-area icon for controls.
 - Hover over the window for full reset details when using the two smallest
   sizes.
 - The header status badge shows `LIVE`, `SYNCING`, or `ERROR`, and appends
