@@ -10,6 +10,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from .host_window import get_claude_window_state
 from .account_usage import ClaudeUsageError, fetch_usage_with_auth_refresh, parse_usage_payload
 from .models import UsageCardModel, build_card_models
+from .window_snap import snap_to_peer
 
 # Shown in the header, window title, and tray tooltip. Change this one
 # constant to rebrand the widget.
@@ -105,7 +106,15 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
         if event and event.buttons() & QtCore.Qt.MouseButton.LeftButton and self._drag_position is not None:
-            self.move(event.globalPosition().toPoint() - self._drag_position)
+            desired = event.globalPosition().toPoint() - self._drag_position
+            snapped_x, snapped_y = snap_to_peer(
+                desired.x(),
+                desired.y(),
+                self.width(),
+                self.height(),
+                own_hwnd=int(self.winId()),
+            )
+            self.move(snapped_x, snapped_y)
             event.accept()
         super().mouseMoveEvent(event)
 
@@ -328,6 +337,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 22 * self._scale, 22 * self._scale)
 
         show_full_content = self._scale >= FULL_CONTENT_MIN_SCALE
+        show_header = True
         compact_footer = self._scale < 0.7
         percentage_only_footer = self._scale < FULL_CONTENT_MIN_SCALE
         row_pitch = (
@@ -340,10 +350,10 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         footer_height = row_pitch * 2 + (8 if percentage_only_footer else 12)
         footer_height = max(footer_height, int(round(96 * self._scale)))
         footer_top = self.height() - footer_height
-        if show_full_content:
-            header_margin = max(16, int(round(24 * self._scale)))
-            header_top = max(6, int(round(12 * self._scale)))
-            header_height = max(22, int(round(24 * self._scale)))
+        if show_header:
+            header_margin = max(4, int(round(24 * self._scale)))
+            header_top = max(3, int(round(12 * self._scale)))
+            header_height = max(18, int(round(24 * self._scale)))
             header_rect = QtCore.QRectF(
                 header_margin,
                 header_top,
@@ -351,23 +361,23 @@ class UsageRingsCanvas(QtWidgets.QWidget):
                 header_height,
             )
 
-            title_font = QtGui.QFont("Segoe UI", max(10, int(round(14 * self._scale))))
+            title_font = QtGui.QFont("Segoe UI", max(8, int(round(14 * self._scale))))
             title_font.setWeight(QtGui.QFont.Weight.DemiBold)
             painter.setFont(title_font)
             painter.setPen(QtGui.QColor("#f5f7fb"))
 
             status = "LIVE" if self._models is not None else ("ERROR" if self._error else "SYNCING")
             status_color = "#46d58b" if status == "LIVE" else ("#ff6b76" if status == "ERROR" else "#b9c4d3")
-            status_font = QtGui.QFont("Segoe UI", max(9, int(round(9 * self._scale))))
+            status_font = QtGui.QFont("Segoe UI", max(7, int(round(9 * self._scale))))
             status_font.setWeight(QtGui.QFont.Weight.DemiBold)
             # Minor change: show when the data was last refreshed alongside
             # the live/error/syncing status instead of the status alone.
             status_text = f"●  {status}"
-            if status == "LIVE" and self._last_refreshed is not None:
+            if self._scale >= 0.5 and status == "LIVE" and self._last_refreshed is not None:
                 status_text = f"●  {status} · {self._last_refreshed:%H:%M}"
             status_width = QtGui.QFontMetrics(status_font).horizontalAdvance(status_text)
             status_width = min(status_width, header_rect.width())
-            title_width = max(0, header_rect.width() - status_width - max(8, int(round(8 * self._scale))))
+            title_width = max(0, header_rect.width() - status_width - max(5, int(round(8 * self._scale))))
             painter.drawText(
                 QtCore.QRectF(header_rect.left(), header_rect.top(), title_width, header_rect.height()),
                 QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
@@ -385,7 +395,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
             ring_top = max(
                 20,
                 int(round(44 * self._scale)),
-                header_top + header_height + max(6, int(round(8 * self._scale))),
+                header_top + header_height + max(4, int(round(8 * self._scale))),
             )
         else:
             ring_top = max(8, int(round(16 * self._scale)))

@@ -14,3 +14,16 @@ dist/
 # Local desktop state
 *.log
 *.tmp
+
+# Credentials and machine-specific configuration
+.credentials.json
+**/.credentials.json
+auth.json
+**/auth.json
+.env
+.env.*
+!.env.example
+
+# Local screenshots and exported diagnostics
+screenshots/
+*-active.png

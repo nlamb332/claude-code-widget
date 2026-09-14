@@ -15,21 +15,45 @@ process.
 ## Requirements
 
 - Windows 10 or 11
-- Python 3.10 or newer
-- PyQt6
-- A signed-in Claude Code account. On Windows, Claude Code normally stores
-  OAuth credentials at `~/.claude/.credentials.json`; if that file is absent,
-  run `claude auth login` once or set `CLAUDE_AUTH_FILE` to the credentials
-  file used by your profile.
+- Python 3.10 or newer on `PATH` (or available through the `py` launcher)
+- Claude Code CLI signed in to a Claude.ai account
 
-## Setup
+## Installation on another Windows system
 
-From PowerShell, create an environment and install the app:
+Clone the public repository, create an isolated Python environment, and
+install the widget:
 
 ```powershell
-py -3.13 -m venv .venv
+git clone https://github.com/your-account/claude-code-widget.git
+cd claude-code-widget
+python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m pip install -e .
+```
+
+If `python` is not available, replace it with `py -3.11` (or another
+installed Python 3.10+ version). Sign in to Claude Code before launching:
+
+If Claude Code is not installed yet, install the official native Windows
+client first (see the [Claude Code setup guide](https://code.claude.com/docs/en/setup)):
+
+```powershell
+irm https://claude.ai/install.ps1 | iex
+```
+
+```powershell
+claude auth login --claudeai
+```
+
+The widget reads the local credential at
+`%USERPROFILE%\.claude\.credentials.json`; never copy that file into this
+repository. If Claude Code uses a custom profile, set `CLAUDE_AUTH_FILE` or
+the relevant Claude Code configuration directory before launching.
+
+To verify the installation immediately:
+
+```powershell
+.venv\Scripts\python.exe scripts\launch_usage_rings.py --start-visible
 ```
 
 For automatic startup, create a desktop shortcut and a Startup shortcut that
@@ -70,13 +94,17 @@ Optional arguments:
 
 - Drag the rings window with the left mouse button. Its position is saved and
   restored when it reappears.
+- The Claude and Codex widgets snap together when the dragged widget comes
+  within 20 pixels of another widget. Left/right placements align their top
+  or bottom edges; top/bottom placements align their left or right edges.
+  Drag farther away to separate them.
 - Click the window once, then use `Ctrl+-` to make it smaller or `Ctrl+=` /
   `Ctrl++` to make it larger.
 - The app starts at the third-smallest size; press `Ctrl+-` once for the
   second-smallest setting and twice for the smallest.
-- The two smallest settings hide the header and the `Weekly` / `remaining`
-  ring labels. Their footer shows compact percentage-only values so every
-  element stays separated.
+- The title/status banner stays visible at every size. At the two smallest
+  settings the refresh time is omitted and the footer uses compact
+  percentage-only values so every element stays separated.
 - Press `Ctrl+T` to toggle the translucent glass background. The choice is
   saved for the next launch.
 - The widget stays off the Windows taskbar like the Codex sibling and keeps a
@@ -118,6 +146,12 @@ Accept: application/json
 The OAuth usage route is the same endpoint Claude Code uses for the 5-hour and
 weekly subscription meters. Credentials stay local and are sent only with
 that usage request; rotated refresh credentials are written back atomically.
+
+## Privacy and repository hygiene
+
+The repository contains source code and installation documentation only. Do
+not commit auth files, API keys, tokens, logs, screenshots, or machine-specific
+paths. Local credential and environment files are ignored by `.gitignore`.
 
 ## Project structure
 
