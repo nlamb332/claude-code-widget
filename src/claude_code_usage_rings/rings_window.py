@@ -59,9 +59,8 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self.setWindowFlags(
             QtCore.Qt.WindowType.FramelessWindowHint
             | QtCore.Qt.WindowType.WindowStaysOnTopHint
-            | QtCore.Qt.WindowType.Window
+            | QtCore.Qt.WindowType.Tool
         )
-        self._ensure_taskbar_presence()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -182,12 +181,10 @@ class UsageRingsWindow(QtWidgets.QWidget):
         return self._glass_mode
 
     def _apply_background_style(self) -> None:
-        if self._glass_mode:
-            self.setStyleSheet("QWidget#usageWidget { background: transparent; border: none; }")
-        else:
-            self.setStyleSheet(
-                "QWidget#usageWidget { background: #171a20; border: 1px solid #2c3440; border-radius: 24px; }"
-            )
+        # The canvas paints the rounded card. Keeping the top-level window
+        # transparent prevents Windows from compositing a black rectangle
+        # around it, including when the widget is launched from a sandbox.
+        self.setStyleSheet("QWidget#usageWidget { background: transparent; border: none; }")
 
     def _change_scale(self, delta: float) -> None:
         next_scale = max(MIN_SCALE, min(MAX_SCALE, round(self._scale + delta, 2)))
@@ -258,23 +255,10 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self.raise_()
         if sys.platform != "win32":
             return
-        self._ensure_taskbar_presence()
         hwnd = int(self.winId())
         # HWND_TOPMOST plus SWP_NOACTIVATE keeps the usage card visible over a
         # normal Claude window without moving focus away from the text box.
         ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0053)
-
-    def _ensure_taskbar_presence(self) -> None:
-        """Expose this borderless window as a normal Windows taskbar item."""
-
-        if sys.platform != "win32":
-            return
-        user32 = ctypes.windll.user32
-        hwnd = int(self.winId())
-        ex_style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
-        ex_style = (ex_style & ~0x00000080) | 0x00040000  # TOOLWINDOW off, APPWINDOW on
-        user32.SetWindowLongW(hwnd, -20, ex_style)
-        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)  # frame/style refresh, no move/resize/activate
 
 
 class UsageRingsCanvas(QtWidgets.QWidget):

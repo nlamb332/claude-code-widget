@@ -2,25 +2,32 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-# NOTE: Claude Code does not publish a documented usage-percentage endpoint
-# the way the Codex desktop app does. These defaults mirror the local
-# credential file Claude Code actually writes and a placeholder API shape
-# modeled on the Codex sibling project; adjust base URL / payload parsing
-# once the real endpoint is confirmed.
-DEFAULT_AUTH_FILE = Path.home() / ".claude" / ".credentials.json"
+# Claude Code stores subscription OAuth credentials in this file on Windows
+# and Linux. Respect profile overrides used by Claude Code before falling back
+# to the normal per-user location.
+def _default_auth_file() -> Path:
+    for variable in ("CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"):
+        configured = os.environ.get(variable)
+        if configured:
+            return Path(configured).expanduser() / ".credentials.json"
+    return Path.home() / ".claude" / ".credentials.json"
+
+
+DEFAULT_AUTH_FILE = _default_auth_file()
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_AUTH_BASE_URL = "https://console.anthropic.com"
-OAUTH_CLIENT_ID = "placeholder-claude-code-client-id"
-OAUTH_SCOPE = "org:usage:read"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
+OAUTH_USAGE_BETA = "oauth-2025-04-20"
 
 
 class ClaudeUsageError(RuntimeError):
@@ -48,31 +55,86 @@ class ClaudeUsage:
 
 
 def load_auth(path: Path) -> dict[str, Any]:
+    requested = Path(path).expanduser()
+    candidates = _auth_file_candidates(requested)
+    existing = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if existing is None:
+        searched = ", ".join(str(candidate) for candidate in candidates)
+        raise ClaudeUsageError(
+            "Claude Code credentials were not found. Sign in with `claude auth login` "
+            f"or set CLAUDE_AUTH_FILE. Searched: {searched}"
+        )
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with existing.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
-    except FileNotFoundError as exc:
-        raise ClaudeUsageError(f"Auth file not found: {path}") from exc
+    except OSError as exc:
+        raise ClaudeUsageError(f"Cannot read Claude Code credentials: {existing}") from exc
     except json.JSONDecodeError as exc:
-        raise ClaudeUsageError(f"Invalid auth file: {path}") from exc
+        raise ClaudeUsageError(f"Invalid Claude Code credentials file: {existing}") from exc
     if not isinstance(data, dict):
         raise ClaudeUsageError("Auth file does not contain a JSON object")
     return data
 
 
+def _auth_file_candidates(requested: Path) -> list[Path]:
+    candidates = [requested]
+    if requested == DEFAULT_AUTH_FILE:
+        for variable in ("CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"):
+            configured = os.environ.get(variable)
+            if configured:
+                candidates.append(Path(configured).expanduser() / ".credentials.json")
+
+        # Claude's MSIX package virtualizes its roaming directory. Include a
+        # plain credentials file there when Claude Code is configured to use
+        # that profile, but never treat the encrypted desktop config.json as a
+        # credentials file.
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            packages = Path(local_app_data) / "Packages"
+            if packages.is_dir():
+                candidates.extend(
+                    package / "LocalCache" / "Roaming" / "Claude" / ".credentials.json"
+                    for package in packages.glob("Claude_*")
+                    if package.is_dir()
+                )
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).casefold()
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
+def _credential_containers(auth: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return Claude Code credential objects in priority order.
+
+    In particular, do not accidentally select an access token belonging to an
+    MCP server or another nested integration before claudeAiOauth.
+    """
+
+    containers: list[dict[str, Any]] = []
+    for key in ("claudeAiOauth", "claude_ai_oauth", "tokens"):
+        value = auth.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    containers.append(auth)
+    return containers
+
+
 def extract_access_token(auth: dict[str, Any]) -> str:
-    tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else auth
-    if isinstance(tokens, dict):
-        for key in ("access_token", "accessToken"):
+    for tokens in _credential_containers(auth):
+        for key in ("accessToken", "access_token"):
             value = tokens.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    raise ClaudeUsageError("Could not find an access token in the Claude credentials file")
+    raise ClaudeUsageError("Claude Code credentials do not contain claudeAiOauth.accessToken")
 
 
 def extract_account_id(auth: dict[str, Any]) -> str:
-    tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else auth
-    if isinstance(tokens, dict):
+    for tokens in _credential_containers(auth):
         for key in ("account_id", "accountId"):
             value = tokens.get(key)
             if isinstance(value, str) and value.strip():
@@ -84,17 +146,18 @@ def extract_account_id(auth: dict[str, Any]) -> str:
             if account_id:
                 return account_id
 
-    raise ClaudeUsageError("Could not find an account id in the Claude credentials file")
+    raise ClaudeUsageError("Claude Code credentials do not contain an account id")
 
 
-def fetch_usage(access_token: str, account_id: str, base_url: str, timeout: float) -> dict[str, Any]:
-    url = f"{base_url.rstrip('/')}/v1/usage"
+def fetch_usage(access_token: str, base_url: str, timeout: float) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/oauth/usage"
     request = Request(
         url,
         headers={
             "Authorization": f"Bearer {access_token}",
-            "anthropic-account-id": account_id,
+            "anthropic-beta": OAUTH_USAGE_BETA,
             "Accept": "application/json",
+            "User-Agent": "claude-code/2.1.270",
         },
         method="GET",
     )
@@ -123,7 +186,6 @@ def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float
     try:
         return fetch_usage(
             extract_access_token(auth),
-            extract_account_id(auth),
             base_url,
             timeout,
         )
@@ -134,7 +196,6 @@ def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float
     refreshed_auth = refresh_auth(auth, auth_file=auth_file, timeout=timeout)
     return fetch_usage(
         extract_access_token(refreshed_auth),
-        extract_account_id(refreshed_auth),
         base_url,
         timeout,
     )
@@ -147,23 +208,22 @@ def refresh_auth(
     timeout: float,
     auth_base_url: str = DEFAULT_AUTH_BASE_URL,
 ) -> dict[str, Any]:
-    tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else auth
-    refresh_token = tokens.get("refresh_token") if isinstance(tokens, dict) else None
+    tokens = next(iter(_credential_containers(auth)), auth)
+    refresh_token = _token_value(tokens, "refreshToken", "refresh_token")
     if not isinstance(refresh_token, str) or not refresh_token.strip():
-        raise ClaudeUsageError("Usage request was unauthorized and the credentials file has no refresh_token")
+        raise ClaudeUsageError("Claude Code credentials have no refreshToken for renewal")
 
-    payload = urlencode(
+    payload = json.dumps(
         {
             "grant_type": "refresh_token",
             "client_id": OAUTH_CLIENT_ID,
             "refresh_token": refresh_token.strip(),
-            "scope": OAUTH_SCOPE,
         }
     ).encode("utf-8")
     request = Request(
-        f"{auth_base_url.rstrip('/')}/oauth/token",
+        f"{auth_base_url.rstrip('/')}/v1/oauth/token",
         data=payload,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
     try:
@@ -191,15 +251,23 @@ def refresh_auth(
         raise ClaudeUsageError("Auth refresh response did not include an access token")
 
     next_auth = dict(auth)
-    next_tokens = dict(tokens) if isinstance(tokens, dict) else {}
-    next_tokens["access_token"] = access_token
-    next_tokens["refresh_token"] = next_refresh_token
+    next_tokens = dict(tokens)
+    uses_camel_case = "claudeAiOauth" in auth or "accessToken" in next_tokens
+    access_key = "accessToken" if uses_camel_case else "access_token"
+    refresh_key = "refreshToken" if uses_camel_case else "refresh_token"
+    next_tokens[access_key] = access_token
+    next_tokens[refresh_key] = next_refresh_token
+    expires_in = _as_int(data.get("expires_in") or data.get("expiresIn"))
+    if expires_in is not None:
+        next_tokens["expiresAt" if uses_camel_case else "expires_at"] = int(time.time() * 1000) + expires_in * 1000
     if id_token:
-        next_tokens["id_token"] = id_token
+        next_tokens["idToken" if uses_camel_case else "id_token"] = id_token
         account_id = _account_id_from_id_token(id_token)
         if account_id:
-            next_tokens["account_id"] = account_id
-    if "tokens" in auth:
+            next_tokens["accountId" if uses_camel_case else "account_id"] = account_id
+    if "claudeAiOauth" in auth:
+        next_auth["claudeAiOauth"] = next_tokens
+    elif "tokens" in auth:
         next_auth["tokens"] = next_tokens
     else:
         next_auth.update(next_tokens)
@@ -210,6 +278,25 @@ def refresh_auth(
 
 def parse_usage_payload(payload: dict[str, Any], now: int | None = None) -> ClaudeUsage:
     now_epoch = int(time.time()) if now is None else now
+
+    five_hour = _parse_usage_window(payload.get("five_hour"), now_epoch)
+    weekly = _parse_usage_window(payload.get("seven_day"), now_epoch)
+    limits = payload.get("limits")
+    if isinstance(limits, list):
+        for item in limits:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if kind == "session" and five_hour is None:
+                five_hour = _parse_usage_window(item, now_epoch)
+            elif kind == "weekly_all" and weekly is None:
+                weekly = _parse_usage_window(item, now_epoch)
+
+    if five_hour is not None or weekly is not None:
+        return ClaudeUsage(five_hour=five_hour, weekly=weekly, plan_type=_plan_type(payload))
+
+    # Keep accepting the older internal rate_limit shape for installations
+    # running a Claude Code proxy or an older client.
     rate_limit = payload.get("rate_limit")
     if not isinstance(rate_limit, dict):
         return ClaudeUsage(five_hour=None, weekly=None, plan_type=_plan_type(payload))
@@ -299,6 +386,48 @@ def _parse_window(raw: Any, now: int) -> UsageWindow | None:
         reset_at=reset_at,
         window_seconds=_as_int(raw.get("limit_window_seconds")),
     )
+
+
+def _parse_usage_window(raw: Any, now: int) -> UsageWindow | None:
+    if not isinstance(raw, dict):
+        return None
+
+    used_percent = None
+    for key in ("utilization", "percentage", "percent", "usage", "used_percent"):
+        if key not in raw:
+            continue
+        used_percent = _as_float(raw.get(key))
+        if used_percent is not None:
+            # Some clients expose utilization as a fraction while the OAuth
+            # usage body normally returns a percentage.
+            if key == "utilization" and 0 <= used_percent <= 1:
+                used_percent *= 100
+            break
+
+    reset_at = _reset_epoch(raw, now)
+    return UsageWindow(
+        used_percent=used_percent,
+        reset_at=reset_at,
+        window_seconds=None,
+    )
+
+
+def _reset_epoch(raw: dict[str, Any], now: int) -> int | None:
+    for key in ("resets_at", "resetsAt", "reset_at", "expires_at"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            # Epoch milliseconds are used by credentials; usage payloads use
+            # seconds when they return a numeric reset.
+            return int(value / 1000) if value > 10_000_000_000 else int(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                normalized = value.strip().replace("Z", "+00:00")
+                return int(datetime.fromisoformat(normalized).timestamp())
+            except ValueError:
+                continue
+
+    reset_after = _as_int(raw.get("reset_after_seconds"))
+    return now + reset_after if reset_after is not None else None
 
 
 def _plan_type(payload: dict[str, Any]) -> str | None:

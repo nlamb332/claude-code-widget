@@ -17,8 +17,10 @@ process.
 - Windows 10 or 11
 - Python 3.10 or newer
 - PyQt6
-- A signed-in Claude desktop app with local credentials at
-  `~/.claude/.credentials.json`
+- A signed-in Claude Code account. On Windows, Claude Code normally stores
+  OAuth credentials at `~/.claude/.credentials.json`; if that file is absent,
+  run `claude auth login` once or set `CLAUDE_AUTH_FILE` to the credentials
+  file used by your profile.
 
 ## Setup
 
@@ -77,9 +79,9 @@ Optional arguments:
   element stays separated.
 - Press `Ctrl+T` to toggle the translucent glass background. The choice is
   saved for the next launch.
-- The widget has a normal Windows taskbar button and also keeps a live rings
-  icon in the notification area. Click either one to show the window or
-  right-click the notification-area icon for controls.
+- The widget stays off the Windows taskbar like the Codex sibling and keeps a
+  live rings icon in the notification area. Click the tray icon or right-click
+  it for controls.
 - Hover over the window for full reset details when using the two smallest
   sizes.
 - The header status badge shows `LIVE`, `SYNCING`, or `ERROR`, and appends
@@ -97,7 +99,7 @@ ambiguous rather than treating Claude as closed.
 
 ## Authentication and data
 
-The app reads Claude Code's local credentials file:
+The app reads Claude Code's local OAuth credentials file:
 
 ```text
 ~/.claude/.credentials.json
@@ -107,17 +109,15 @@ It extracts the access token and account ID as needed, then requests usage
 from a placeholder endpoint modeled on the Codex sibling project:
 
 ```http
-GET https://api.anthropic.com/v1/usage
+GET https://api.anthropic.com/api/oauth/usage
 Authorization: Bearer <access_token>
-anthropic-account-id: <account_id>
+anthropic-beta: oauth-2025-04-20
 Accept: application/json
 ```
 
-Anthropic does not currently publish a documented usage-percentage endpoint
-for Claude Code the way OpenAI does for Codex, so the base URL, request
-shape, and response parsing here are a structural placeholder carried over
-from codex-widget — update `account_usage.py` once the real endpoint is
-confirmed. Credentials stay local and are sent only with that usage request.
+The OAuth usage route is the same endpoint Claude Code uses for the 5-hour and
+weekly subscription meters. Credentials stay local and are sent only with
+that usage request; rotated refresh credentials are written back atomically.
 
 ## Project structure
 
