@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-code-usage-rings"
+version = "0.1.0"
+description = "Standalone Windows desktop app for Claude Code usage rings"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6",
+]
+
+[project.scripts]
+claude-code-usage-rings = "claude_code_usage_rings.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

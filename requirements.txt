@@ -1,0 +1,2 @@
+# Runtime dependency for Claude Code Usage Rings
+PyQt6>=6.6
