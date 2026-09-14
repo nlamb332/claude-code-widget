@@ -21,6 +21,7 @@ class UsageRingsTray(QtWidgets.QSystemTrayIcon):
         super().__init__(app)
         self._window = window
         self.setToolTip(f"{APP_NAME} Usage Rings")
+        self._window.setWindowIcon(self._make_icon(None, None))
         self.setContextMenu(self._build_menu())
         self.activated.connect(self._handle_activation)
         window.usage_changed.connect(self._update_icon)
@@ -61,7 +62,9 @@ class UsageRingsTray(QtWidgets.QSystemTrayIcon):
         cards = models if isinstance(models, tuple) and len(models) == 2 else None
         outer = cards[0] if cards is not None else None
         inner = cards[1] if cards is not None else None
-        self.setIcon(self._make_icon(outer, inner))
+        icon = self._make_icon(outer, inner)
+        self.setIcon(icon)
+        self._window.setWindowIcon(icon)
         if outer is not None and inner is not None:
             self.setToolTip(
                 f"{APP_NAME} Usage Rings | 5-hour {outer.percent_remaining}% remaining; "

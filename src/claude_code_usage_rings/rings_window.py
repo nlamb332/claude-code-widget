@@ -61,6 +61,7 @@ class UsageRingsWindow(QtWidgets.QWidget):
             | QtCore.Qt.WindowType.WindowStaysOnTopHint
             | QtCore.Qt.WindowType.Window
         )
+        self._ensure_taskbar_presence()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -257,10 +258,23 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self.raise_()
         if sys.platform != "win32":
             return
+        self._ensure_taskbar_presence()
         hwnd = int(self.winId())
         # HWND_TOPMOST plus SWP_NOACTIVATE keeps the usage card visible over a
         # normal Claude window without moving focus away from the text box.
         ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0053)
+
+    def _ensure_taskbar_presence(self) -> None:
+        """Expose this borderless window as a normal Windows taskbar item."""
+
+        if sys.platform != "win32":
+            return
+        user32 = ctypes.windll.user32
+        hwnd = int(self.winId())
+        ex_style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+        ex_style = (ex_style & ~0x00000080) | 0x00040000  # TOOLWINDOW off, APPWINDOW on
+        user32.SetWindowLongW(hwnd, -20, ex_style)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)  # frame/style refresh, no move/resize/activate
 
 
 class UsageRingsCanvas(QtWidgets.QWidget):
