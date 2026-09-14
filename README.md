@@ -90,7 +90,10 @@ Optional arguments:
 
 On Windows, the app checks the current Claude desktop process and the
 packaged application frame. It polls twice per second so the rings follow
-open, minimized, and closed Claude states without a second manual launch.
+open, minimized, and closed Claude states without a second manual launch. If
+Claude Code is running as a console/background process with no detectable
+top-level window, the widget stays visible because the window state is
+ambiguous rather than treating Claude as closed.
 
 ## Authentication and data
 

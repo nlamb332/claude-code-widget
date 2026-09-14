@@ -25,10 +25,11 @@ class ClaudeWindowState:
     def should_show_widget(self) -> bool:
         if not self.supported:
             return True
-        # A background claude.exe helper can outlive the desktop shell. Require
-        # a matching top-level window so closing Claude hides the rings and a
-        # newly opened shell can trigger them to return.
-        return self.running and self.window_found and not self.minimized
+        # Claude Code can run as a console/background process without exposing
+        # a top-level window that EnumWindows can observe. Treat that state as
+        # unknown rather than hiding a manually launched widget. Hide only
+        # when Claude is definitely closed or an observed window is minimized.
+        return self.running and (not self.window_found or not self.minimized)
 
 
 def get_claude_window_state() -> ClaudeWindowState:
