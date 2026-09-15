@@ -24,6 +24,7 @@ Clone the public repository, create an isolated Python environment, and
 install the widget:
 
 ```powershell
+# Replace your-account with the GitHub owner of this repository.
 git clone https://github.com/your-account/claude-code-widget.git
 cd claude-code-widget
 python -m venv .venv
@@ -43,6 +44,12 @@ irm https://claude.ai/install.ps1 | iex
 
 ```powershell
 claude auth login --claudeai
+```
+
+Confirm that the credentials file exists before starting the widget:
+
+```powershell
+Test-Path "$env:USERPROFILE\.claude\.credentials.json"
 ```
 
 The widget reads the local credential at
@@ -94,9 +101,10 @@ Optional arguments:
 
 - Drag the rings window with the left mouse button. Its position is saved and
   restored when it reappears.
-- The Claude and Codex widgets snap together when the dragged widget comes
-  within 20 pixels of another widget and overlaps it by at least 75% along
-  the alignment axis. Left/right placements align their top or bottom edges;
+- The Claude and Codex widgets move freely during a drag. On mouse release,
+  they snap together only when the final position is within 20 pixels and
+  overlaps at least 75% along the alignment axis. The visible card borders
+  touch when snapped. Left/right placements align their top or bottom edges;
   top/bottom placements align their left or right edges. Once snapped,
   dragging either card moves the connected pair together. Press `Ctrl+S` while
   a widget is focused to separate the pair.
