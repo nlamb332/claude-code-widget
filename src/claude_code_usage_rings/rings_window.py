@@ -642,6 +642,46 @@ class UsageRingsCanvas(QtWidgets.QWidget):
                 percentage_only=percentage_only_footer,
             )
 
+        # Paint the banner last so compact rings or footer text can never
+        # cover it when a window is resized to a small tier.
+        self._draw_persistent_header(painter)
+
+    def _draw_persistent_header(self, painter: QtGui.QPainter) -> None:
+        header_margin = max(4, int(round(24 * self._scale)))
+        header_top = max(3, int(round(12 * self._scale)))
+        header_height = max(18, int(round(24 * self._scale)))
+        header_rect = QtCore.QRectF(
+            header_margin,
+            header_top,
+            max(0, self.width() - 2 * header_margin),
+            header_height,
+        )
+        title_font = QtGui.QFont("Segoe UI", max(8, int(round(14 * self._scale))))
+        title_font.setWeight(QtGui.QFont.Weight.DemiBold)
+        painter.setFont(title_font)
+        painter.setPen(QtGui.QColor("#f5f7fb"))
+        status = "LIVE" if self._models is not None else ("ERROR" if self._error else "SYNCING")
+        status_color = "#46d58b" if status == "LIVE" else ("#ff6b76" if status == "ERROR" else "#b9c4d3")
+        status_font = QtGui.QFont("Segoe UI", max(7, int(round(9 * self._scale))))
+        status_font.setWeight(QtGui.QFont.Weight.DemiBold)
+        status_text = f"●  {status}"
+        if self._scale >= 0.5 and status == "LIVE" and self._last_refreshed is not None:
+            status_text = f"●  {status} · {self._last_refreshed:%H:%M}"
+        status_width = min(QtGui.QFontMetrics(status_font).horizontalAdvance(status_text), header_rect.width())
+        title_width = max(0, header_rect.width() - status_width - max(5, int(round(8 * self._scale))))
+        painter.drawText(
+            QtCore.QRectF(header_rect.left(), header_rect.top(), title_width, header_rect.height()),
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            f"{APP_NAME} usage",
+        )
+        painter.setFont(status_font)
+        painter.setPen(QtGui.QColor(status_color))
+        painter.drawText(
+            QtCore.QRectF(header_rect.right() - status_width, header_rect.top(), status_width, header_rect.height()),
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            status_text,
+        )
+
     def _draw_legend_row(
         self,
         painter: QtGui.QPainter,
