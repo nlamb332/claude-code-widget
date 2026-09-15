@@ -153,15 +153,22 @@ If the badge does not reach `LIVE`, run one refresh in the foreground:
 ```
 
 It prints the credentials path, the raw usage response, and the parsed
-windows, or the exact failure. `HTTP 401`/`HTTP 403` means the stored
-credentials need `claude auth login --claudeai`; `HTTP 429` means Claude is
-throttling the account and the widget will retry with backoff.
+windows, or the exact failure. If Claude still rejects the sign-in after
+Claude Code has tried to renew it, run `claude auth login --claudeai`;
+`HTTP 429` means Claude is throttling the account and the widget will retry
+with backoff.
 
-Note that the widget renews the OAuth token only when it is actually
-expiring, and at most once every 10 minutes. Claude Code rotates the refresh
-token on each renewal, so renewing on every tick both invites `HTTP 429` from
-the token endpoint and can invalidate the credentials Claude Code itself is
-using.
+The widget never renews the OAuth token or writes the credentials file
+itself, because the token endpoint refuses renewals that do not come from
+Claude Code. When a usage request is rejected, the widget runs Claude Code's
+local `claude -p /usage` command (no model call, so no usage cost), which
+renews the sign-in the way Claude Code normally would, then reads the file
+again. It asks at most once every 10 minutes. The CLI is found on `PATH`, in
+the Claude desktop app's bundled copy, or at `CLAUDE_USAGE_CLI`.
+
+Losing the network is not treated as a sign-in problem: offline refreshes
+retry every 30 seconds, keep the last rings on screen, and never trigger a
+renewal.
 
 ## Claude lifecycle detection
 
@@ -192,7 +199,8 @@ Accept: application/json
 
 The OAuth usage route is the same endpoint Claude Code uses for the 5-hour and
 weekly subscription meters. Credentials stay local and are sent only with
-that usage request; rotated refresh credentials are written back atomically.
+that usage request. The widget only reads the credentials file; renewing it
+is left to Claude Code.
 
 ## Privacy and repository hygiene
 

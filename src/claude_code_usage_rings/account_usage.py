@@ -4,6 +4,9 @@ import base64
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,7 +14,6 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 # Claude Code stores subscription OAuth credentials in this file on Windows
@@ -27,25 +29,24 @@ def _default_auth_file() -> Path:
 
 DEFAULT_AUTH_FILE = _default_auth_file()
 DEFAULT_BASE_URL = "https://api.anthropic.com"
-# Claude Code's OAuth token endpoint is hosted on the platform domain. The
-# console host used to accept this request, but now commonly returns 403.
-DEFAULT_AUTH_BASE_URL = "https://platform.claude.com"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
 OAUTH_USAGE_BETA = "oauth-2025-04-20"
 RATE_LIMIT_RETRIES = 2
 RATE_LIMIT_FALLBACK_DELAY_SECONDS = 2.0
 RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
-# Claude Code rotates the refresh token on every renewal. Renewing once a
-# minute - which is what an unconditional refresh-on-403 does - gets the
-# token endpoint to answer HTTP 429 and can invalidate the refresh token
-# Claude Code itself is holding. Renew only when the stored token is
-# actually expiring, and never more than once per cooldown window.
-AUTH_EXPIRY_SKEW_SECONDS = 120
-AUTH_REFRESH_COOLDOWN_SECONDS = 600
+# Claude Code renews the sign-in, not the widget (see
+# _renew_with_claude_code_guarded). Ask it at most once per cooldown window so
+# a persistently rejected token cannot start the CLI on every refresh tick.
+RENEWAL_COOLDOWN_SECONDS = 600
+CLI_RENEWAL_TIMEOUT_SECONDS = 90
+# Keep the CLI's console window hidden when the widget runs under pythonw.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+# The Claude desktop app sets these for its own sessions; passing them on would
+# make the CLI act as part of that session instead of renewing the standalone
+# sign-in. The config-dir overrides must survive so it renews the file we read.
+_KEPT_CLAUDE_VARIABLES = frozenset({"CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"})
 
 LOGGER = logging.getLogger("claude_code_usage_rings")
-_LAST_REFRESH_ATTEMPT = 0.0
+_LAST_RENEWAL_ATTEMPT = 0.0
 
 
 class ClaudeUsageError(RuntimeError):
@@ -216,187 +217,122 @@ def fetch_usage(access_token: str, base_url: str, timeout: float) -> dict[str, A
 
 
 def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float) -> dict[str, Any]:
-    auth = load_auth(auth_file)
-    if _access_token_expired(auth):
-        LOGGER.info("stored access token is expired; renewing before fetching usage")
-        auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout, reason="expired")
-
+    # Always try the stored token first, even when it looks expired. A rejected
+    # request proves the network is up; an offline one raises ClaudeNetworkError
+    # and never reaches the renewal below.
     try:
-        return fetch_usage(
-            extract_access_token(auth),
-            base_url,
-            timeout,
-        )
+        return fetch_usage(extract_access_token(load_auth(auth_file)), base_url, timeout)
     except ClaudeUsageError as exc:
         if not _is_auth_failure(exc):
             raise
-        LOGGER.warning("usage request rejected (%s); attempting a token renewal", exc)
+        LOGGER.warning("usage request rejected (%s); asking Claude Code to renew the sign-in", exc)
 
-    refreshed_auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout, reason="rejected")
-    return fetch_usage(
-        extract_access_token(refreshed_auth),
-        base_url,
-        timeout,
-    )
+    _renew_with_claude_code_guarded()
+    try:
+        return fetch_usage(extract_access_token(load_auth(auth_file)), base_url, timeout)
+    except ClaudeUsageError as exc:
+        if not _is_auth_failure(exc):
+            raise
+        raise ClaudeUsageError(
+            "Claude still rejects the sign-in after Claude Code tried to renew it. "
+            "Run `claude auth login --claudeai`."
+        ) from exc
 
 
-def _refresh_auth_guarded(
-    auth: dict[str, Any],
-    *,
-    auth_file: Path,
-    timeout: float,
-    reason: str,
-) -> dict[str, Any]:
-    """Renew the token at most once per cooldown window.
+def _renew_with_claude_code_guarded() -> None:
+    """Have Claude Code renew its own sign-in, at most once per cooldown window.
 
-    Without this guard a persistently rejected usage request renews the token
-    on every refresh tick. Claude Code rotates the refresh token on each
-    renewal, so that loop both invites HTTP 429 from the token endpoint and
-    races Claude Code for the credentials file, which is how the widget ends
-    up unable to recover on its own.
-
-    Only an attempt that reached the token endpoint starts the cooldown. An
-    attempt made while offline never left the machine, and counting it used
-    to lock renewal out for ten minutes after every Wi-Fi reconnect.
+    The token endpoint answers the widget's own renewal requests with HTTP 429,
+    even on the first use of a fresh refresh token, while it accepts Claude
+    Code's. So the widget never renews or writes the credentials file itself:
+    it runs Claude Code's local /usage command, which renews an expired sign-in
+    as part of reading usage, and the caller then reads the file again.
     """
 
-    global _LAST_REFRESH_ATTEMPT
+    global _LAST_RENEWAL_ATTEMPT
 
     now = time.monotonic()
-    since = now - _LAST_REFRESH_ATTEMPT
-    if _LAST_REFRESH_ATTEMPT and since < AUTH_REFRESH_COOLDOWN_SECONDS:
-        wait = int(AUTH_REFRESH_COOLDOWN_SECONDS - since)
-        if reason == "expired":
-            raise ClaudeUsageError(
-                f"The access token expired and a renewal was attempted {int(since)}s ago. "
-                f"Retrying the renewal in {wait}s."
-            )
+    since = now - _LAST_RENEWAL_ATTEMPT
+    if _LAST_RENEWAL_ATTEMPT and since < RENEWAL_COOLDOWN_SECONDS:
         raise ClaudeUsageError(
-            f"Claude rejected the access token; a renewal was attempted {int(since)}s ago. "
-            f"Retrying the renewal in {wait}s; run `claude auth login --claudeai` if this persists."
+            f"Claude rejected the access token; Claude Code was asked to renew it {int(since)}s ago. "
+            f"Trying again in {int(RENEWAL_COOLDOWN_SECONDS - since)}s; "
+            "run `claude auth login --claudeai` if this persists."
         )
+    cli = find_claude_cli()
+    if cli is None:
+        raise ClaudeUsageError(
+            "The sign-in needs renewing but the Claude CLI was not found. "
+            "Run `claude auth login --claudeai`, or set CLAUDE_USAGE_CLI to claude.exe."
+        )
+    _LAST_RENEWAL_ATTEMPT = now
+    _run_claude_usage_command(cli)
+
+
+def _run_claude_usage_command(cli: str) -> None:
+    """Run `claude -p /usage`: a local command, so it makes no model call."""
+
+    env = {name: value for name, value in os.environ.items() if not _is_host_session_variable(name)}
     try:
-        refreshed = refresh_auth(auth, auth_file=auth_file, timeout=timeout)
-    except ClaudeNetworkError:
-        raise
-    except ClaudeUsageError:
-        _LAST_REFRESH_ATTEMPT = now
-        raise
-    _LAST_REFRESH_ATTEMPT = now
-    return refreshed
+        result = subprocess.run(
+            [cli, "-p", "/usage"],
+            env=env,
+            cwd=str(Path.home()),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=CLI_RENEWAL_TIMEOUT_SECONDS,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ClaudeUsageError(f"Could not run Claude Code to renew the sign-in ({type(exc).__name__})") from exc
+    if result.returncode == 0:
+        LOGGER.info("asked Claude Code to renew the sign-in")
+        return
+    detail = next((line.strip() for line in (result.stderr or result.stdout or "").splitlines() if line.strip()), "")
+    LOGGER.warning("Claude Code exited %d while renewing the sign-in: %s", result.returncode, detail[:200])
 
 
-def _access_token_expired(auth: dict[str, Any], now: float | None = None) -> bool:
-    """Report whether the stored access token is at or past its expiry."""
-
-    expires_at = None
-    for tokens in _credential_containers(auth):
-        for key in ("expiresAt", "expires_at"):
-            expires_at = _as_int(tokens.get(key))
-            if expires_at is not None:
-                break
-        if expires_at is not None:
-            break
-    if expires_at is None:
-        return False
-    # Credentials store milliseconds; tolerate a seconds-based value too.
-    seconds = expires_at / 1000 if expires_at > 10_000_000_000 else expires_at
-    current = time.time() if now is None else now
-    return seconds - AUTH_EXPIRY_SKEW_SECONDS <= current
+def _is_host_session_variable(name: str) -> bool:
+    upper = name.upper()
+    return upper.startswith(("CLAUDE", "ANTHROPIC")) and upper not in _KEPT_CLAUDE_VARIABLES
 
 
-def refresh_auth(
-    auth: dict[str, Any],
-    *,
-    auth_file: Path,
-    timeout: float,
-    auth_base_url: str = DEFAULT_AUTH_BASE_URL,
-) -> dict[str, Any]:
-    tokens = next(iter(_credential_containers(auth)), auth)
-    refresh_token = _token_value(tokens, "refreshToken", "refresh_token")
-    if not isinstance(refresh_token, str) or not refresh_token.strip():
-        raise ClaudeUsageError("Claude Code credentials have no refreshToken for renewal")
+def find_claude_cli() -> str | None:
+    """Locate a Claude Code CLI: an override, PATH, then the desktop app's copy."""
 
-    # Claude Code sends an OAuth form post. In particular, the endpoint does
-    # not treat the equivalent JSON body as a token refresh request, and the
-    # scope is required for subscription OAuth credentials.
-    payload = urlencode(
-        {
-            "grant_type": "refresh_token",
-            "client_id": OAUTH_CLIENT_ID,
-            "refresh_token": refresh_token.strip(),
-            "scope": OAUTH_SCOPE,
-        }
-    ).encode("utf-8")
-    request = Request(
-        f"{auth_base_url.rstrip('/')}/v1/oauth/token",
-        data=payload,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "User-Agent": "claude-code/2.1.270",
-        },
-        method="POST",
-    )
-    rate_limit_attempts = 0
-    while True:
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                raw = response.read()
-            break
-        except HTTPError as exc:
-            if exc.code == 429 and rate_limit_attempts < RATE_LIMIT_RETRIES:
-                rate_limit_attempts += 1
-                _pause_for_rate_limit(exc)
-                continue
-            detail = _safe_error_body(exc)
-            error_type = ClaudeRateLimitError if exc.code == 429 else ClaudeUsageError
-            raise error_type(f"Auth refresh failed with HTTP {exc.code}: {detail}") from exc
-        except URLError as exc:
-            raise ClaudeNetworkError(f"Network error while refreshing auth: {exc.reason}") from exc
-        except TimeoutError as exc:
-            # Unlike a failed connection, a read timeout may mean the endpoint
-            # did rotate the token, so it is not reported as a network error.
-            raise ClaudeUsageError("Timed out while refreshing auth") from exc
+    configured = os.environ.get("CLAUDE_USAGE_CLI")
+    if configured and Path(configured).is_file():
+        return configured
+    on_path = shutil.which("claude")
+    if on_path:
+        return on_path
 
+    candidates: list[Path] = []
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        # The MSIX-packaged desktop app keeps its bundled CLI in the package's
+        # virtualized roaming directory, one folder per version.
+        candidates.extend(
+            Path(local_app_data, "Packages").glob("Claude_*/LocalCache/Roaming/Claude/claude-code/*/claude.exe")
+        )
+    app_data = os.environ.get("APPDATA")
+    if app_data:
+        candidates.extend(Path(app_data, "Claude", "claude-code").glob("*/claude.exe"))
+    candidates.append(Path.home() / ".local" / "bin" / "claude.exe")
+    existing = [candidate for candidate in candidates if candidate.is_file()]
+    if not existing:
+        return None
+    return str(max(existing, key=_cli_version_key))
+
+
+def _cli_version_key(path: Path) -> tuple[int, ...]:
     try:
-        data = json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ClaudeUsageError("Auth refresh response is not valid JSON") from exc
-    if not isinstance(data, dict):
-        raise ClaudeUsageError("Auth refresh response does not contain a JSON object")
-
-    access_token = _token_value(data, "access_token", "accessToken")
-    next_refresh_token = _token_value(data, "refresh_token", "refreshToken") or refresh_token.strip()
-    id_token = _token_value(data, "id_token", "idToken")
-    if not access_token:
-        raise ClaudeUsageError("Auth refresh response did not include an access token")
-
-    next_auth = dict(auth)
-    next_tokens = dict(tokens)
-    uses_camel_case = "claudeAiOauth" in auth or "accessToken" in next_tokens
-    access_key = "accessToken" if uses_camel_case else "access_token"
-    refresh_key = "refreshToken" if uses_camel_case else "refresh_token"
-    next_tokens[access_key] = access_token
-    next_tokens[refresh_key] = next_refresh_token
-    expires_in = _as_int(data.get("expires_in") or data.get("expiresIn"))
-    if expires_in is not None:
-        next_tokens["expiresAt" if uses_camel_case else "expires_at"] = int(time.time() * 1000) + expires_in * 1000
-    if id_token:
-        next_tokens["idToken" if uses_camel_case else "id_token"] = id_token
-        account_id = _account_id_from_id_token(id_token)
-        if account_id:
-            next_tokens["accountId" if uses_camel_case else "account_id"] = account_id
-    if "claudeAiOauth" in auth:
-        next_auth["claudeAiOauth"] = next_tokens
-    elif "tokens" in auth:
-        next_auth["tokens"] = next_tokens
-    else:
-        next_auth.update(next_tokens)
-    next_auth["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    _write_auth(auth_file, next_auth)
-    LOGGER.info("renewed Claude Code OAuth credentials")
-    return next_auth
+        return tuple(int(part) for part in path.parent.name.split("."))
+    except ValueError:
+        return (0,)
 
 
 def parse_usage_payload(payload: dict[str, Any], now: int | None = None) -> ClaudeUsage:
@@ -499,35 +435,6 @@ def _pause_for_rate_limit(exc: HTTPError) -> None:
 
 def _is_auth_failure(exc: ClaudeUsageError) -> bool:
     return str(exc).startswith("HTTP 401 ") or str(exc).startswith("HTTP 403 ")
-
-
-def _token_value(data: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _write_auth(path: Path, auth: dict[str, Any]) -> None:
-    # Claude Code holds this file open on Windows, so a failed replace is an
-    # expected outcome rather than a crash. Raise the project's own error type
-    # so the caller reports it instead of killing the worker thread.
-    temporary = path.with_name(f"{path.name}.tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(auth, indent=2), encoding="utf-8")
-        try:
-            temporary.chmod(0o600)
-        except OSError:
-            pass
-        temporary.replace(path)
-    except OSError as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise ClaudeUsageError(f"Cannot update Claude Code credentials at {path}: {exc}") from exc
 
 
 def _parse_window(raw: Any, now: int) -> UsageWindow | None:
