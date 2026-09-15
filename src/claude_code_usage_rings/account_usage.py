@@ -56,6 +56,10 @@ class ClaudeRateLimitError(ClaudeUsageError):
     """A temporary service throttle, not a credential or parsing failure."""
 
 
+class ClaudeNetworkError(ClaudeUsageError):
+    """No connection was made (for example, Wi-Fi is down), so nothing changed server-side."""
+
+
 @dataclass(frozen=True)
 class UsageWindow:
     used_percent: float | None
@@ -198,9 +202,9 @@ def fetch_usage(access_token: str, base_url: str, timeout: float) -> dict[str, A
             error_type = ClaudeRateLimitError if exc.code == 429 else ClaudeUsageError
             raise error_type(f"HTTP {exc.code} while fetching usage: {detail}") from exc
         except URLError as exc:
-            raise ClaudeUsageError(f"Network error while fetching usage: {exc.reason}") from exc
+            raise ClaudeNetworkError(f"Network error while fetching usage: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise ClaudeUsageError("Timed out while fetching usage") from exc
+            raise ClaudeNetworkError("Timed out while fetching usage") from exc
 
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -215,7 +219,7 @@ def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float
     auth = load_auth(auth_file)
     if _access_token_expired(auth):
         LOGGER.info("stored access token is expired; renewing before fetching usage")
-        auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout)
+        auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout, reason="expired")
 
     try:
         return fetch_usage(
@@ -228,7 +232,7 @@ def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float
             raise
         LOGGER.warning("usage request rejected (%s); attempting a token renewal", exc)
 
-    refreshed_auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout)
+    refreshed_auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout, reason="rejected")
     return fetch_usage(
         extract_access_token(refreshed_auth),
         base_url,
@@ -241,6 +245,7 @@ def _refresh_auth_guarded(
     *,
     auth_file: Path,
     timeout: float,
+    reason: str,
 ) -> dict[str, Any]:
     """Renew the token at most once per cooldown window.
 
@@ -249,6 +254,10 @@ def _refresh_auth_guarded(
     renewal, so that loop both invites HTTP 429 from the token endpoint and
     races Claude Code for the credentials file, which is how the widget ends
     up unable to recover on its own.
+
+    Only an attempt that reached the token endpoint starts the cooldown. An
+    attempt made while offline never left the machine, and counting it used
+    to lock renewal out for ten minutes after every Wi-Fi reconnect.
     """
 
     global _LAST_REFRESH_ATTEMPT
@@ -257,13 +266,24 @@ def _refresh_auth_guarded(
     since = now - _LAST_REFRESH_ATTEMPT
     if _LAST_REFRESH_ATTEMPT and since < AUTH_REFRESH_COOLDOWN_SECONDS:
         wait = int(AUTH_REFRESH_COOLDOWN_SECONDS - since)
+        if reason == "expired":
+            raise ClaudeUsageError(
+                f"The access token expired and a renewal was attempted {int(since)}s ago. "
+                f"Retrying the renewal in {wait}s."
+            )
         raise ClaudeUsageError(
-            "Claude rejected the stored credentials and the token was already renewed "
-            f"{int(since)}s ago. Waiting {wait}s before renewing again; "
-            "run `claude auth login --claudeai` if this persists."
+            f"Claude rejected the access token; a renewal was attempted {int(since)}s ago. "
+            f"Retrying the renewal in {wait}s; run `claude auth login --claudeai` if this persists."
         )
+    try:
+        refreshed = refresh_auth(auth, auth_file=auth_file, timeout=timeout)
+    except ClaudeNetworkError:
+        raise
+    except ClaudeUsageError:
+        _LAST_REFRESH_ATTEMPT = now
+        raise
     _LAST_REFRESH_ATTEMPT = now
-    return refresh_auth(auth, auth_file=auth_file, timeout=timeout)
+    return refreshed
 
 
 def _access_token_expired(auth: dict[str, Any], now: float | None = None) -> bool:
@@ -333,8 +353,10 @@ def refresh_auth(
             error_type = ClaudeRateLimitError if exc.code == 429 else ClaudeUsageError
             raise error_type(f"Auth refresh failed with HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise ClaudeUsageError(f"Network error while refreshing auth: {exc.reason}") from exc
+            raise ClaudeNetworkError(f"Network error while refreshing auth: {exc.reason}") from exc
         except TimeoutError as exc:
+            # Unlike a failed connection, a read timeout may mean the endpoint
+            # did rotate the token, so it is not reported as a network error.
             raise ClaudeUsageError("Timed out while refreshing auth") from exc
 
     try:

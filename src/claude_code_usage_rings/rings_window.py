@@ -9,7 +9,12 @@ from typing import Optional
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from .host_window import get_claude_window_state
-from .account_usage import ClaudeUsageError, fetch_usage_with_auth_refresh, parse_usage_payload
+from .account_usage import (
+    ClaudeNetworkError,
+    ClaudeUsageError,
+    fetch_usage_with_auth_refresh,
+    parse_usage_payload,
+)
 from .models import UsageCardModel, build_card_models
 from .window_snap import (
     find_connected_peer,
@@ -33,6 +38,9 @@ DEFAULT_SCALE = FULL_CONTENT_MIN_SCALE
 # A failing refresh must not keep polling at the healthy cadence: hammering a
 # throttled endpoint every minute is what keeps it throttled.
 MAX_REFRESH_BACKOFF_SECONDS = 15 * 60
+# Offline failures never reach the server, so they retry on a short fixed
+# cadence instead of backing off. The rings recover soon after a reconnect.
+OFFLINE_RETRY_SECONDS = 30
 
 LOGGER = logging.getLogger("claude_code_usage_rings")
 
@@ -303,14 +311,20 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._rings.set_models(cards, last_refreshed=datetime.now().astimezone())
         self.usage_changed.emit(cards)
 
-    @QtCore.pyqtSlot(str)
-    def _handle_usage_failed(self, message: str) -> None:
-        self._consecutive_failures += 1
-        LOGGER.warning("usage refresh failed (attempt %d): %s", self._consecutive_failures, message)
-        self._back_off()
-        if "HTTP 429" in message and self._rings.has_models:
-            # A throttle is only transient noise when there is already
-            # something to show. Keep the last good rings and retry later.
+    @QtCore.pyqtSlot(str, bool)
+    def _handle_usage_failed(self, message: str, offline: bool) -> None:
+        if offline:
+            # Nothing reached the server, so there is nothing to back off
+            # from. Retry soon so the rings recover right after a reconnect.
+            LOGGER.warning("usage refresh failed (offline): %s", message)
+            self._apply_refresh_interval(OFFLINE_RETRY_SECONDS)
+        else:
+            self._consecutive_failures += 1
+            LOGGER.warning("usage refresh failed (attempt %d): %s", self._consecutive_failures, message)
+            self._back_off()
+        if (offline or "HTTP 429" in message) and self._rings.has_models:
+            # A throttle or a dropped connection is only transient noise when
+            # there is already something to show. Keep the last good rings.
             self._rings.set_syncing(message)
             return
         # Never leave the widget sitting on SYNCING with nothing behind it:
@@ -878,7 +892,8 @@ def _ring_color(remaining: int) -> QtGui.QColor:
 
 class UsageFetchWorker(QtCore.QObject):
     loaded = QtCore.pyqtSignal(object)
-    failed = QtCore.pyqtSignal(str)
+    # The flag marks failures where no connection was made (offline).
+    failed = QtCore.pyqtSignal(str, bool)
     finished = QtCore.pyqtSignal()
 
     def __init__(self, *, auth_file, base_url: str) -> None:
@@ -892,13 +907,15 @@ class UsageFetchWorker(QtCore.QObject):
             payload = fetch_usage_with_auth_refresh(self._auth_file, self._base_url, timeout=20.0)
             usage = parse_usage_payload(payload)
             self.loaded.emit(build_card_models(five_hour=usage.five_hour, weekly=usage.weekly))
+        except ClaudeNetworkError as exc:
+            self.failed.emit(str(exc), True)
         except ClaudeUsageError as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(str(exc), False)
         except Exception as exc:  # noqa: BLE001 - a silent worker is the worse failure
             # Anything unexpected here previously escaped the slot, so no
             # result signal was ever emitted and the window stayed on its
             # initial SYNCING state forever. Report it instead.
             LOGGER.exception("unexpected error while refreshing usage")
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.failed.emit(f"{type(exc).__name__}: {exc}", False)
         finally:
             self.finished.emit()
