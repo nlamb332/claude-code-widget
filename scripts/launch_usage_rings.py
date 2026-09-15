@@ -83,16 +83,19 @@ def _current_desktop_name() -> str | None:
     return _desktop_name(handle) if handle else None
 
 
-def _relay_to_interactive_desktop() -> bool:
-    """Run the GUI on the user's desktop when launched from an isolated shell."""
+def _relay_to_interactive_desktop() -> int | None:
+    """Run the GUI on the user's desktop when launched from an isolated shell.
+
+    Returns the relayed child's exit code, or None when no relay was needed.
+    """
 
     if sys.platform != "win32":
-        return False
+        return None
 
     current = _current_desktop_name()
     target = _input_desktop_name() or "Default"
     if current is None or current.casefold() == target.casefold():
-        return False
+        return None
 
     command = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
     command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
@@ -118,11 +121,15 @@ def _relay_to_interactive_desktop() -> bool:
     # This also lets the watchdog supervise the real GUI process.
     ctypes.windll.kernel32.CloseHandle(process_info.hThread)
     ctypes.windll.kernel32.WaitForSingleObject(process_info.hProcess, 0xFFFFFFFF)
+    # Pass the child's exit code through so a deliberate quit reaches the watchdog.
+    exit_code = wintypes.DWORD()
+    ctypes.windll.kernel32.GetExitCodeProcess(process_info.hProcess, ctypes.byref(exit_code))
     ctypes.windll.kernel32.CloseHandle(process_info.hProcess)
-    return True
+    return int(exit_code.value)
 
 
 if __name__ == "__main__":
-    if _relay_to_interactive_desktop():
-        raise SystemExit(0)
+    relayed_exit_code = _relay_to_interactive_desktop()
+    if relayed_exit_code is not None:
+        raise SystemExit(relayed_exit_code)
     raise SystemExit(main())

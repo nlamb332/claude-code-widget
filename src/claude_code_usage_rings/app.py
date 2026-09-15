@@ -22,6 +22,10 @@ from .models import UsageCardModel
 
 from .rings_window import APP_NAME, UsageRingsWindow
 
+# The watchdog stops supervising when the widget exits with this code, so a
+# deliberate quit is not undone by an automatic restart.
+USER_QUIT_EXIT_CODE = 10
+
 
 class UsageRingsTray(QtWidgets.QSystemTrayIcon):
     """Status icon and small control menu for the borderless rings window."""
@@ -48,6 +52,9 @@ class UsageRingsTray(QtWidgets.QSystemTrayIcon):
         self._glass_action = menu.addAction("Glass background")
         self._glass_action.setCheckable(True)
         self._glass_action.triggered.connect(self._window.set_glass_mode)
+        menu.addSeparator()
+        quit_action = menu.addAction("Quit usage rings\tCtrl+Q")
+        quit_action.triggered.connect(self._window.quit_requested.emit)
         return menu
 
     @QtCore.pyqtSlot(bool)
@@ -167,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     tray = UsageRingsTray(widget, app)
     tray.show()
     app.aboutToQuit.connect(tray.hide)
+    widget.quit_requested.connect(lambda: _quit(app, widget))
     if args.start_visible:
         widget.show()
         widget._raise_without_focus()
@@ -177,6 +185,13 @@ def main(argv: list[str] | None = None) -> int:
         widget._sync_with_claude()
     app.aboutToQuit.connect(lambda: _release_single_instance(instance_mutex))
     return app.exec()
+
+
+def _quit(app: QtWidgets.QApplication, widget: UsageRingsWindow) -> None:
+    """Close for good: save the window state, then tell the watchdog to stop."""
+
+    widget.close()
+    app.exit(USER_QUIT_EXIT_CODE)
 
 
 def _default_log_file() -> Path:

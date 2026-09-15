@@ -42,6 +42,7 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
     usage_changed = QtCore.pyqtSignal(object)
     glass_mode_changed = QtCore.pyqtSignal(bool)
+    quit_requested = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -105,6 +106,11 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._unsnap_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+S"), self)
         self._unsnap_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self._unsnap_shortcut.activated.connect(self._unsnap)
+        # Each widget runs in its own process, so an application shortcut
+        # quits only the widget that currently has focus.
+        self._quit_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self)
+        self._quit_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self._quit_shortcut.activated.connect(self.quit_requested.emit)
 
         self._base_refresh_seconds = max(15, refresh_seconds)
         self._consecutive_failures = 0

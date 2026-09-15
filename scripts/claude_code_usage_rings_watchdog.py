@@ -13,6 +13,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WIDGET_SCRIPT = PROJECT_ROOT / "scripts" / "launch_usage_rings.py"
 _SUPERVISOR_MUTEX = "Local\\ClaudeCodeUsageRingsSupervisor"
+# Must match USER_QUIT_EXIT_CODE in src/claude_code_usage_rings/app.py.
+USER_QUIT_EXIT_CODE = 10
 
 
 def main() -> int:
@@ -37,7 +39,9 @@ def main() -> int:
                 # prevents one child from starting.
                 time.sleep(5)
                 continue
-            child.wait()
+            if child.wait() == USER_QUIT_EXIT_CODE:
+                # The user quit on purpose; restarting would undo that.
+                return 0
             # A normal close or a transient startup failure should not leave
             # the widget unavailable, but avoid a tight respawn loop.
             time.sleep(3)

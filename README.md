@@ -64,9 +64,11 @@ To verify the installation immediately:
 ```
 
 For automatic startup, create a desktop shortcut and a Startup shortcut that
-run `pythonw.exe` with `scripts\claude_code_usage_rings_watchdog.py` as the
-argument and this repository as the working directory. The watchdog starts
-the app in the background and restarts it after an unexpected exit.
+run `pythonw.exe` with `scripts\start_with_update.py` as the argument and this
+repository as the working directory. It pulls the latest `main` from GitHub,
+then hands off to the watchdog, which starts the app in the background and
+restarts it after an unexpected exit. Update results are logged to
+`%LOCALAPPDATA%\ClaudeCodeUsageRings\update.log`.
 
 ## Usage
 
@@ -119,6 +121,9 @@ Optional arguments:
   percentage-only values so every element stays separated.
 - Press `Ctrl+T` to toggle the translucent glass background. The choice is
   saved for the next launch.
+- Press `Ctrl+Q` while a widget is focused, or choose **Quit usage rings** from
+  its tray menu, to close that widget. Quitting also stops its watchdog, so it
+  stays closed until the next sign-in or until you start it again.
 - The widget stays off the Windows taskbar like the Codex sibling and keeps a
   live rings icon in the notification area. Click the tray icon or right-click
   it for controls.
@@ -200,6 +205,7 @@ paths. Local credential and environment files are ignored by `.gitignore`.
 ```text
 scripts/launch_usage_rings.py                       Development launcher
 scripts/claude_code_usage_rings_watchdog.py          Startup supervisor
+scripts/start_with_update.py                        Startup entry: update, then supervise
 src/claude_code_usage_rings/app.py                   Application entry point
 src/claude_code_usage_rings/host_window.py           Claude process/window detection
 src/claude_code_usage_rings/account_usage.py         Authentication and usage fetching
