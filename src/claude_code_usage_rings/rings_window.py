@@ -10,7 +10,13 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from .host_window import get_claude_window_state
 from .account_usage import ClaudeUsageError, fetch_usage_with_auth_refresh, parse_usage_payload
 from .models import UsageCardModel, build_card_models
-from .window_snap import snap_to_peer
+from .window_snap import (
+    find_connected_peer,
+    find_snap_candidate,
+    get_window_rect,
+    move_window,
+    windows_are_connected,
+)
 
 # Shown in the header, window title, and tray tooltip. Change this one
 # constant to rebrand the widget.
@@ -42,6 +48,8 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._auth_file = auth_file
         self._base_url = base_url
         self._drag_position: QtCore.QPoint | None = None
+        self._snap_peer_hwnd: int | None = None
+        self._snap_peer_offset: QtCore.QPoint | None = None
         self._thread: QtCore.QThread | None = None
         self._worker: UsageFetchWorker | None = None
         self._scale = DEFAULT_SCALE
@@ -51,6 +59,7 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._glass_mode = bool(self._settings.value("window/glass", False, type=bool))
 
         self._rings = UsageRingsCanvas(parent=self)
+        self._rings.installEventFilter(self)
         self._layout = QtWidgets.QHBoxLayout(self)
         self._layout.setContentsMargins(18, 14, 18, 14)
         self._layout.setSpacing(12)
@@ -82,6 +91,9 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._glass_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+T"), self)
         self._glass_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self._glass_shortcut.activated.connect(self._toggle_glass_mode)
+        self._unsnap_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+S"), self)
+        self._unsnap_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self._unsnap_shortcut.activated.connect(self._unsnap)
 
         self._usage_timer = QtCore.QTimer(self)
         self._usage_timer.setInterval(max(15, refresh_seconds) * 1000)
@@ -98,29 +110,127 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._usage_timer.start()
         self._lifecycle_timer.start()
 
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        if watched is self._rings:
+            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                self.mousePressEvent(event)  # type: ignore[arg-type]
+                return True
+            if event.type() == QtCore.QEvent.Type.MouseMove:
+                self.mouseMoveEvent(event)  # type: ignore[arg-type]
+                return True
+            if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+                self.mouseReleaseEvent(event)  # type: ignore[arg-type]
+                return True
+        return super().eventFilter(watched, event)
+
     def mousePressEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
         if event and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._refresh_snap_peer()
+            self.grabMouse()
             event.accept()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
         if event and event.buttons() & QtCore.Qt.MouseButton.LeftButton and self._drag_position is not None:
             desired = event.globalPosition().toPoint() - self._drag_position
-            snapped_x, snapped_y = snap_to_peer(
-                desired.x(),
-                desired.y(),
-                self.width(),
-                self.height(),
-                own_hwnd=int(self.winId()),
-            )
-            self.move(snapped_x, snapped_y)
+            self._move_dragged_window(desired)
             event.accept()
         super().mouseMoveEvent(event)
+
+    def _current_window_rect(self) -> tuple[int, int, int, int]:
+        return self.x(), self.y(), self.x() + self.width(), self.y() + self.height()
+
+    def _clear_snap_state(self) -> None:
+        self._snap_peer_hwnd = None
+        self._snap_peer_offset = None
+
+    def _refresh_snap_peer(self) -> None:
+        own_hwnd = int(self.winId())
+        own_rect = self._current_window_rect()
+        if self._snap_peer_hwnd is not None:
+            peer_rect = get_window_rect(self._snap_peer_hwnd)
+            if peer_rect is None or not windows_are_connected(own_rect, peer_rect):
+                self._clear_snap_state()
+
+        if self._snap_peer_hwnd is None:
+            self._snap_peer_hwnd = find_connected_peer(own_hwnd)
+
+        if self._snap_peer_hwnd is not None:
+            peer_rect = get_window_rect(self._snap_peer_hwnd)
+            if peer_rect is None:
+                self._clear_snap_state()
+            else:
+                self._snap_peer_offset = QtCore.QPoint(
+                    peer_rect[0] - self.x(),
+                    peer_rect[1] - self.y(),
+                )
+
+    def _move_dragged_window(self, desired: QtCore.QPoint) -> None:
+        if self._snap_peer_hwnd is not None and self._snap_peer_offset is not None:
+            peer_rect = get_window_rect(self._snap_peer_hwnd)
+            if peer_rect is not None and windows_are_connected(self._current_window_rect(), peer_rect):
+                self.move(desired)
+                move_window(
+                    self._snap_peer_hwnd,
+                    desired.x() + self._snap_peer_offset.x(),
+                    desired.y() + self._snap_peer_offset.y(),
+                )
+                return
+            self._clear_snap_state()
+
+        candidate = find_snap_candidate(
+            desired.x(),
+            desired.y(),
+            self.width(),
+            self.height(),
+            own_hwnd=int(self.winId()),
+        )
+        if candidate is None:
+            self.move(desired)
+            return
+
+        peer_rect = get_window_rect(candidate.peer_hwnd)
+        self.move(candidate.x, candidate.y)
+        if peer_rect is None:
+            return
+        self._snap_peer_hwnd = candidate.peer_hwnd
+        self._snap_peer_offset = QtCore.QPoint(
+            peer_rect[0] - candidate.x,
+            peer_rect[1] - candidate.y,
+        )
+        move_window(
+            candidate.peer_hwnd,
+            candidate.x + self._snap_peer_offset.x(),
+            candidate.y + self._snap_peer_offset.y(),
+        )
+
+    @QtCore.pyqtSlot()
+    def _unsnap(self) -> None:
+        self._refresh_snap_peer()
+        peer_rect = get_window_rect(self._snap_peer_hwnd) if self._snap_peer_hwnd is not None else None
+        new_x, new_y = self.x(), self.y()
+        if peer_rect is not None:
+            own_left, own_top, own_right, own_bottom = self._current_window_rect()
+            peer_left, peer_top, peer_right, peer_bottom = peer_rect
+            separation = 24
+            if abs(own_right - peer_left) <= 3:
+                new_x -= separation
+            elif abs(own_left - peer_right) <= 3:
+                new_x += separation
+            elif abs(own_bottom - peer_top) <= 3:
+                new_y -= separation
+            elif abs(own_top - peer_bottom) <= 3:
+                new_y += separation
+        self._clear_snap_state()
+        if (new_x, new_y) != (self.x(), self.y()):
+            self.move(new_x, new_y)
+        self._save_position()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
         if event and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._drag_position = None
+            self.releaseMouse()
             self._save_position()
             event.accept()
         super().mouseReleaseEvent(event)
