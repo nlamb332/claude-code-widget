@@ -6,6 +6,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -31,10 +32,17 @@ DEFAULT_AUTH_BASE_URL = "https://platform.claude.com"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
 OAUTH_USAGE_BETA = "oauth-2025-04-20"
+RATE_LIMIT_RETRIES = 2
+RATE_LIMIT_FALLBACK_DELAY_SECONDS = 2.0
+RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
 
 
 class ClaudeUsageError(RuntimeError):
     pass
+
+
+class ClaudeRateLimitError(ClaudeUsageError):
+    """A temporary service throttle, not a credential or parsing failure."""
 
 
 @dataclass(frozen=True)
@@ -164,16 +172,24 @@ def fetch_usage(access_token: str, base_url: str, timeout: float) -> dict[str, A
         },
         method="GET",
     )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except HTTPError as exc:
-        detail = _safe_error_body(exc)
-        raise ClaudeUsageError(f"HTTP {exc.code} while fetching usage: {detail}") from exc
-    except URLError as exc:
-        raise ClaudeUsageError(f"Network error while fetching usage: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise ClaudeUsageError("Timed out while fetching usage") from exc
+    rate_limit_attempts = 0
+    while True:
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+            break
+        except HTTPError as exc:
+            if exc.code == 429 and rate_limit_attempts < RATE_LIMIT_RETRIES:
+                rate_limit_attempts += 1
+                _pause_for_rate_limit(exc)
+                continue
+            detail = _safe_error_body(exc)
+            error_type = ClaudeRateLimitError if exc.code == 429 else ClaudeUsageError
+            raise error_type(f"HTTP {exc.code} while fetching usage: {detail}") from exc
+        except URLError as exc:
+            raise ClaudeUsageError(f"Network error while fetching usage: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise ClaudeUsageError("Timed out while fetching usage") from exc
 
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -237,16 +253,24 @@ def refresh_auth(
         },
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except HTTPError as exc:
-        detail = _safe_error_body(exc)
-        raise ClaudeUsageError(f"Auth refresh failed with HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise ClaudeUsageError(f"Network error while refreshing auth: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise ClaudeUsageError("Timed out while refreshing auth") from exc
+    rate_limit_attempts = 0
+    while True:
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+            break
+        except HTTPError as exc:
+            if exc.code == 429 and rate_limit_attempts < RATE_LIMIT_RETRIES:
+                rate_limit_attempts += 1
+                _pause_for_rate_limit(exc)
+                continue
+            detail = _safe_error_body(exc)
+            error_type = ClaudeRateLimitError if exc.code == 429 else ClaudeUsageError
+            raise error_type(f"Auth refresh failed with HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise ClaudeUsageError(f"Network error while refreshing auth: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise ClaudeUsageError("Timed out while refreshing auth") from exc
 
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -360,6 +384,29 @@ def _safe_error_body(exc: HTTPError) -> str:
     if not raw:
         return exc.reason or "error without details"
     return raw[:500]
+
+
+def _pause_for_rate_limit(exc: HTTPError) -> None:
+    """Honor Retry-After without allowing a background refresh to hang."""
+
+    delay = RATE_LIMIT_FALLBACK_DELAY_SECONDS
+    retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                delay = RATE_LIMIT_MAX_DELAY_SECONDS
+    try:
+        exc.close()
+    except Exception:
+        pass
+    time.sleep(max(0.5, min(delay, RATE_LIMIT_MAX_DELAY_SECONDS)))
 
 
 def _is_auth_failure(exc: ClaudeUsageError) -> bool:

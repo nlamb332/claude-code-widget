@@ -288,6 +288,11 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(str)
     def _handle_usage_failed(self, message: str) -> None:
+        if "HTTP 429" in message:
+            self._rings.set_syncing()
+            # Keep the tray icon and the last good rings while the service
+            # throttle clears. The next timer tick will retry automatically.
+            return
         self._rings.set_error(message)
         self.usage_changed.emit(None)
 
@@ -410,6 +415,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         self._scale = 1.0
         self._models: tuple[UsageCardModel, UsageCardModel] | None = None
         self._error: str | None = None
+        self._stale = False
         self._glass_mode = False
         self._last_refreshed: datetime | None = None
         self.setMinimumSize(372, 412)
@@ -434,6 +440,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
     ) -> None:
         self._models = models
         self._error = None
+        self._stale = False
         if last_refreshed is not None:
             self._last_refreshed = last_refreshed
         self.setToolTip(
@@ -444,9 +451,16 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         )
         self.update()
 
+    def set_syncing(self) -> None:
+        self._stale = True
+        self._error = None
+        self.setToolTip(f"{APP_NAME} usage is temporarily rate limited; retrying")
+        self.update()
+
     def set_error(self, message: str) -> None:
         self._models = None
         self._error = message[:80]
+        self._stale = False
         self.setToolTip(f"{APP_NAME} usage unavailable: {self._error}")
         self.update()
 
@@ -498,7 +512,9 @@ class UsageRingsCanvas(QtWidgets.QWidget):
             painter.setFont(title_font)
             painter.setPen(QtGui.QColor("#f5f7fb"))
 
-            status = "LIVE" if self._models is not None else ("ERROR" if self._error else "SYNCING")
+            status = "LIVE" if self._models is not None and not self._stale else (
+                "SYNCING" if self._stale or not self._error else "ERROR"
+            )
             status_color = "#46d58b" if status == "LIVE" else ("#ff6b76" if status == "ERROR" else "#b9c4d3")
             status_font = QtGui.QFont("Segoe UI", max(7, int(round(9 * self._scale))))
             status_font.setWeight(QtGui.QFont.Weight.DemiBold)
@@ -682,7 +698,9 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         title_font.setWeight(QtGui.QFont.Weight.DemiBold)
         painter.setFont(title_font)
         painter.setPen(QtGui.QColor("#f5f7fb"))
-        status = "LIVE" if self._models is not None else ("ERROR" if self._error else "SYNCING")
+        status = "LIVE" if self._models is not None and not self._stale else (
+            "SYNCING" if self._stale or not self._error else "ERROR"
+        )
         status_color = "#46d58b" if status == "LIVE" else ("#ff6b76" if status == "ERROR" else "#b9c4d3")
         status_font = QtGui.QFont("Segoe UI", max(7, int(round(9 * self._scale))))
         status_font.setWeight(QtGui.QFont.Weight.DemiBold)

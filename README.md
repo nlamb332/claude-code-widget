@@ -125,6 +125,10 @@ Optional arguments:
 - The header status badge shows `LIVE`, `SYNCING`, or `ERROR`, and appends
   the time of the last successful refresh (for example `LIVE · 14:32`) once
   usage data has loaded.
+- Temporary Claude service throttles (`HTTP 429`) are retried with the
+  server's `Retry-After` value when provided. If the widget already has data,
+  it keeps the last successful rings visible and shows `SYNCING` until the
+  next refresh succeeds.
 
 ## Claude lifecycle detection
 
