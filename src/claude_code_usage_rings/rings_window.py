@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import sys
 from datetime import datetime
 from typing import Optional
@@ -28,6 +29,12 @@ MAX_SCALE = 1.8
 SCALE_STEP = 0.1
 FULL_CONTENT_MIN_SCALE = round(MIN_SCALE + (2 * SCALE_STEP), 2)
 DEFAULT_SCALE = FULL_CONTENT_MIN_SCALE
+
+# A failing refresh must not keep polling at the healthy cadence: hammering a
+# throttled endpoint every minute is what keeps it throttled.
+MAX_REFRESH_BACKOFF_SECONDS = 15 * 60
+
+LOGGER = logging.getLogger("claude_code_usage_rings")
 
 
 class UsageRingsWindow(QtWidgets.QWidget):
@@ -99,8 +106,10 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._unsnap_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self._unsnap_shortcut.activated.connect(self._unsnap)
 
+        self._base_refresh_seconds = max(15, refresh_seconds)
+        self._consecutive_failures = 0
         self._usage_timer = QtCore.QTimer(self)
-        self._usage_timer.setInterval(max(15, refresh_seconds) * 1000)
+        self._usage_timer.setInterval(self._base_refresh_seconds * 1000)
         self._usage_timer.timeout.connect(self.refresh)
 
         self._lifecycle_timer = QtCore.QTimer(self)
@@ -283,18 +292,40 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(object)
     def _handle_usage_loaded(self, cards: tuple[UsageCardModel, UsageCardModel]) -> None:
+        self._consecutive_failures = 0
+        self._apply_refresh_interval(self._base_refresh_seconds)
         self._rings.set_models(cards, last_refreshed=datetime.now().astimezone())
         self.usage_changed.emit(cards)
 
     @QtCore.pyqtSlot(str)
     def _handle_usage_failed(self, message: str) -> None:
-        if "HTTP 429" in message:
-            self._rings.set_syncing()
-            # Keep the tray icon and the last good rings while the service
-            # throttle clears. The next timer tick will retry automatically.
+        self._consecutive_failures += 1
+        LOGGER.warning("usage refresh failed (attempt %d): %s", self._consecutive_failures, message)
+        self._back_off()
+        if "HTTP 429" in message and self._rings.has_models:
+            # A throttle is only transient noise when there is already
+            # something to show. Keep the last good rings and retry later.
+            self._rings.set_syncing(message)
             return
+        # Never leave the widget sitting on SYNCING with nothing behind it:
+        # without usage data the status has to name the actual failure, or the
+        # widget looks like it is still working when it has given up.
         self._rings.set_error(message)
         self.usage_changed.emit(None)
+
+    def _back_off(self) -> None:
+        interval = min(
+            self._base_refresh_seconds * (2 ** min(self._consecutive_failures, 8)),
+            MAX_REFRESH_BACKOFF_SECONDS,
+        )
+        self._apply_refresh_interval(interval)
+
+    def _apply_refresh_interval(self, seconds: int) -> None:
+        milliseconds = int(seconds) * 1000
+        if self._usage_timer.interval() == milliseconds:
+            return
+        self._usage_timer.setInterval(milliseconds)
+        LOGGER.info("next usage refresh in %ds", int(seconds))
 
     def _increase_scale(self) -> None:
         self._change_scale(SCALE_STEP)
@@ -407,6 +438,21 @@ class UsageRingsWindow(QtWidgets.QWidget):
         ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0053)
 
 
+def _status_label(models: object, stale: bool, error: str | None) -> str:
+    """Map the canvas state onto the header badge.
+
+    SYNCING means "data on screen, refresh in flight". It must not double as
+    the state for "no data and an error we decided not to show", which is how
+    the widget used to get pinned on SYNCING indefinitely.
+    """
+
+    if error:
+        return "ERROR"
+    if models is None:
+        return "SYNCING"
+    return "SYNCING" if stale else "LIVE"
+
+
 class UsageRingsCanvas(QtWidgets.QWidget):
     """Paint the 5-hour ring around the weekly ring."""
 
@@ -451,10 +497,17 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         )
         self.update()
 
-    def set_syncing(self) -> None:
+    @property
+    def has_models(self) -> bool:
+        return self._models is not None
+
+    def set_syncing(self, detail: str | None = None) -> None:
         self._stale = True
         self._error = None
-        self.setToolTip(f"{APP_NAME} usage is temporarily rate limited; retrying")
+        tooltip = f"{APP_NAME} usage is temporarily rate limited; retrying"
+        if detail:
+            tooltip = f"{tooltip}\n{detail[:160]}"
+        self.setToolTip(tooltip)
         self.update()
 
     def set_error(self, message: str) -> None:
@@ -512,9 +565,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
             painter.setFont(title_font)
             painter.setPen(QtGui.QColor("#f5f7fb"))
 
-            status = "LIVE" if self._models is not None and not self._stale else (
-                "SYNCING" if self._stale or not self._error else "ERROR"
-            )
+            status = _status_label(self._models, self._stale, self._error)
             status_color = "#46d58b" if status == "LIVE" else ("#ff6b76" if status == "ERROR" else "#b9c4d3")
             status_font = QtGui.QFont("Segoe UI", max(7, int(round(9 * self._scale))))
             status_font.setWeight(QtGui.QFont.Weight.DemiBold)
@@ -698,9 +749,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         title_font.setWeight(QtGui.QFont.Weight.DemiBold)
         painter.setFont(title_font)
         painter.setPen(QtGui.QColor("#f5f7fb"))
-        status = "LIVE" if self._models is not None and not self._stale else (
-            "SYNCING" if self._stale or not self._error else "ERROR"
-        )
+        status = _status_label(self._models, self._stale, self._error)
         status_color = "#46d58b" if status == "LIVE" else ("#ff6b76" if status == "ERROR" else "#b9c4d3")
         status_font = QtGui.QFont("Segoe UI", max(7, int(round(9 * self._scale))))
         status_font.setWeight(QtGui.QFont.Weight.DemiBold)
@@ -839,5 +888,11 @@ class UsageFetchWorker(QtCore.QObject):
             self.loaded.emit(build_card_models(five_hour=usage.five_hour, weekly=usage.weekly))
         except ClaudeUsageError as exc:
             self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - a silent worker is the worse failure
+            # Anything unexpected here previously escaped the slot, so no
+            # result signal was ever emitted and the window stayed on its
+            # initial SYNCING state forever. Report it instead.
+            LOGGER.exception("unexpected error while refreshing usage")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             self.finished.emit()

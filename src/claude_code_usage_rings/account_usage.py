@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -35,6 +36,16 @@ OAUTH_USAGE_BETA = "oauth-2025-04-20"
 RATE_LIMIT_RETRIES = 2
 RATE_LIMIT_FALLBACK_DELAY_SECONDS = 2.0
 RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
+# Claude Code rotates the refresh token on every renewal. Renewing once a
+# minute - which is what an unconditional refresh-on-403 does - gets the
+# token endpoint to answer HTTP 429 and can invalidate the refresh token
+# Claude Code itself is holding. Renew only when the stored token is
+# actually expiring, and never more than once per cooldown window.
+AUTH_EXPIRY_SKEW_SECONDS = 120
+AUTH_REFRESH_COOLDOWN_SECONDS = 600
+
+LOGGER = logging.getLogger("claude_code_usage_rings")
+_LAST_REFRESH_ATTEMPT = 0.0
 
 
 class ClaudeUsageError(RuntimeError):
@@ -202,6 +213,10 @@ def fetch_usage(access_token: str, base_url: str, timeout: float) -> dict[str, A
 
 def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float) -> dict[str, Any]:
     auth = load_auth(auth_file)
+    if _access_token_expired(auth):
+        LOGGER.info("stored access token is expired; renewing before fetching usage")
+        auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout)
+
     try:
         return fetch_usage(
             extract_access_token(auth),
@@ -211,13 +226,63 @@ def fetch_usage_with_auth_refresh(auth_file: Path, base_url: str, timeout: float
     except ClaudeUsageError as exc:
         if not _is_auth_failure(exc):
             raise
+        LOGGER.warning("usage request rejected (%s); attempting a token renewal", exc)
 
-    refreshed_auth = refresh_auth(auth, auth_file=auth_file, timeout=timeout)
+    refreshed_auth = _refresh_auth_guarded(auth, auth_file=auth_file, timeout=timeout)
     return fetch_usage(
         extract_access_token(refreshed_auth),
         base_url,
         timeout,
     )
+
+
+def _refresh_auth_guarded(
+    auth: dict[str, Any],
+    *,
+    auth_file: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    """Renew the token at most once per cooldown window.
+
+    Without this guard a persistently rejected usage request renews the token
+    on every refresh tick. Claude Code rotates the refresh token on each
+    renewal, so that loop both invites HTTP 429 from the token endpoint and
+    races Claude Code for the credentials file, which is how the widget ends
+    up unable to recover on its own.
+    """
+
+    global _LAST_REFRESH_ATTEMPT
+
+    now = time.monotonic()
+    since = now - _LAST_REFRESH_ATTEMPT
+    if _LAST_REFRESH_ATTEMPT and since < AUTH_REFRESH_COOLDOWN_SECONDS:
+        wait = int(AUTH_REFRESH_COOLDOWN_SECONDS - since)
+        raise ClaudeUsageError(
+            "Claude rejected the stored credentials and the token was already renewed "
+            f"{int(since)}s ago. Waiting {wait}s before renewing again; "
+            "run `claude auth login --claudeai` if this persists."
+        )
+    _LAST_REFRESH_ATTEMPT = now
+    return refresh_auth(auth, auth_file=auth_file, timeout=timeout)
+
+
+def _access_token_expired(auth: dict[str, Any], now: float | None = None) -> bool:
+    """Report whether the stored access token is at or past its expiry."""
+
+    expires_at = None
+    for tokens in _credential_containers(auth):
+        for key in ("expiresAt", "expires_at"):
+            expires_at = _as_int(tokens.get(key))
+            if expires_at is not None:
+                break
+        if expires_at is not None:
+            break
+    if expires_at is None:
+        return False
+    # Credentials store milliseconds; tolerate a seconds-based value too.
+    seconds = expires_at / 1000 if expires_at > 10_000_000_000 else expires_at
+    current = time.time() if now is None else now
+    return seconds - AUTH_EXPIRY_SKEW_SECONDS <= current
 
 
 def refresh_auth(
@@ -308,6 +373,7 @@ def refresh_auth(
         next_auth.update(next_tokens)
     next_auth["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _write_auth(auth_file, next_auth)
+    LOGGER.info("renewed Claude Code OAuth credentials")
     return next_auth
 
 
@@ -422,11 +488,24 @@ def _token_value(data: dict[str, Any], *keys: str) -> str | None:
 
 
 def _write_auth(path: Path, auth: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Claude Code holds this file open on Windows, so a failed replace is an
+    # expected outcome rather than a crash. Raise the project's own error type
+    # so the caller reports it instead of killing the worker thread.
     temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(json.dumps(auth, indent=2), encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(auth, indent=2), encoding="utf-8")
+        try:
+            temporary.chmod(0o600)
+        except OSError:
+            pass
+        temporary.replace(path)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ClaudeUsageError(f"Cannot update Claude Code credentials at {path}: {exc}") from exc
 
 
 def _parse_window(raw: Any, now: int) -> UsageWindow | None:

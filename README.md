@@ -95,6 +95,8 @@ Optional arguments:
 --base-url URL
 --refresh-seconds SECONDS
 --start-visible
+--log-file PATH
+--diagnose
 ```
 
 ## Interaction
@@ -128,7 +130,33 @@ Optional arguments:
 - Temporary Claude service throttles (`HTTP 429`) are retried with the
   server's `Retry-After` value when provided. If the widget already has data,
   it keeps the last successful rings visible and shows `SYNCING` until the
-  next refresh succeeds.
+  next refresh succeeds. With no usage data yet, a failed refresh always shows
+  `ERROR` with the reason instead of `SYNCING`, so the widget never looks busy
+  when it has actually given up.
+- Repeated failures back the refresh off exponentially, from the normal
+  interval up to 15 minutes, and reset on the first success.
+- Every refresh failure is written to
+  `%LOCALAPPDATA%\ClaudeCodeUsageRings\usage.log` (override with
+  `--log-file`).
+
+## Troubleshooting
+
+If the badge does not reach `LIVE`, run one refresh in the foreground:
+
+```powershell
+.venv\Scripts\python.exe scripts\launch_usage_rings.py --diagnose
+```
+
+It prints the credentials path, the raw usage response, and the parsed
+windows, or the exact failure. `HTTP 401`/`HTTP 403` means the stored
+credentials need `claude auth login --claudeai`; `HTTP 429` means Claude is
+throttling the account and the widget will retry with backoff.
+
+Note that the widget renews the OAuth token only when it is actually
+expiring, and at most once every 10 minutes. Claude Code rotates the refresh
+token on each renewal, so renewing on every tick both invites `HTTP 429` from
+the token endpoint and can invalidate the credentials Claude Code itself is
+using.
 
 ## Claude lifecycle detection
 

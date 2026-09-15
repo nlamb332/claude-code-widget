@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
+import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .account_usage import DEFAULT_AUTH_FILE, DEFAULT_BASE_URL
+from .account_usage import (
+    DEFAULT_AUTH_FILE,
+    DEFAULT_BASE_URL,
+    ClaudeUsageError,
+    fetch_usage_with_auth_refresh,
+    parse_usage_payload,
+)
 from .models import UsageCardModel
 
 from .rings_window import APP_NAME, UsageRingsWindow
@@ -128,7 +137,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show the widget immediately before lifecycle synchronization takes over.",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Where to write the refresh log. Defaults to the per-user application data directory.",
+    )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Run one usage refresh in the foreground, print the result, and exit.",
+    )
     args = parser.parse_args(argv)
+    _configure_logging(args.log_file, verbose=args.diagnose)
+    if args.diagnose:
+        return _diagnose(args.auth_file, args.base_url)
     instance_mutex = _acquire_single_instance()
     if instance_mutex == 0:
         return 0
@@ -154,6 +177,65 @@ def main(argv: list[str] | None = None) -> int:
         widget._sync_with_claude()
     app.aboutToQuit.connect(lambda: _release_single_instance(instance_mutex))
     return app.exec()
+
+
+def _default_log_file() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME")
+    root = Path(base) if base else Path.home() / ".cache"
+    return root / "ClaudeCodeUsageRings" / "usage.log"
+
+
+def _configure_logging(log_file: Path | None, *, verbose: bool) -> None:
+    """Give every refresh failure somewhere to land.
+
+    The widget previously reported failures only through the header badge, so
+    a refresh that quietly gave up left nothing to inspect afterwards.
+    """
+
+    logger = logging.getLogger("claude_code_usage_rings")
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    logger.propagate = False
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    if verbose or sys.stderr is not None:
+        stream = logging.StreamHandler()
+        stream.setFormatter(formatter)
+        logger.addHandler(stream)
+
+    target = log_file or _default_log_file()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(target, maxBytes=256_000, backupCount=2, encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.info("logging to %s", target)
+
+
+def _diagnose(auth_file: Path, base_url: str) -> int:
+    """Print exactly what a refresh does, so a stuck badge can be explained."""
+
+    print(f"auth file : {auth_file}")
+    print(f"base url  : {base_url}")
+    try:
+        payload = fetch_usage_with_auth_refresh(auth_file, base_url, timeout=20.0)
+    except ClaudeUsageError as exc:
+        print(f"FAILED    : {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAILED    : {type(exc).__name__}: {exc}")
+        return 1
+
+    print("payload   :")
+    print(json.dumps(payload, indent=2)[:4000])
+    usage = parse_usage_payload(payload)
+    print(f"5-hour    : {usage.five_hour}")
+    print(f"weekly    : {usage.weekly}")
+    if usage.five_hour is None and usage.weekly is None:
+        print("NOTE      : the response parsed but contained no recognized usage windows.")
+        return 1
+    return 0
 
 
 def _acquire_single_instance() -> int | None:
