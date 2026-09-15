@@ -61,7 +61,11 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._rings = UsageRingsCanvas(parent=self)
         self._rings.installEventFilter(self)
         self._layout = QtWidgets.QHBoxLayout(self)
-        self._layout.setContentsMargins(18, 14, 18, 14)
+        # The painted canvas is the complete visible card. Keeping the
+        # top-level window flush with it makes snapped card borders touch,
+        # instead of leaving the former transparent layout margins between
+        # the widgets.
+        self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(12)
         self._layout.addWidget(self._rings)
 
@@ -183,30 +187,35 @@ class UsageRingsWindow(QtWidgets.QWidget):
                 return
             self._clear_snap_state()
 
+        # Do not snap while dragging. This lets the user pass through a
+        # candidate zone and choose whether to snap by where they release.
+        move_window(own_hwnd, desired.x(), desired.y())
+
+    def _snap_on_release(self, desired: QtCore.QPoint) -> None:
+        if self._snap_peer_hwnd is not None:
+            return
+
+        own_hwnd = int(self.winId())
+        own_rect = self._current_window_rect()
         candidate = find_snap_candidate(
             desired.x(),
             desired.y(),
-            self._current_window_rect()[2] - self._current_window_rect()[0],
-            self._current_window_rect()[3] - self._current_window_rect()[1],
+            own_rect[2] - own_rect[0],
+            own_rect[3] - own_rect[1],
             own_hwnd=own_hwnd,
         )
         if candidate is None:
-            move_window(own_hwnd, desired.x(), desired.y())
             return
 
         peer_rect = get_window_rect(candidate.peer_hwnd)
-        move_window(own_hwnd, candidate.x, candidate.y)
         if peer_rect is None:
             return
+
+        move_window(own_hwnd, candidate.x, candidate.y)
         self._snap_peer_hwnd = candidate.peer_hwnd
         self._snap_peer_offset = QtCore.QPoint(
             peer_rect[0] - candidate.x,
             peer_rect[1] - candidate.y,
-        )
-        move_window(
-            candidate.peer_hwnd,
-            candidate.x + self._snap_peer_offset.x(),
-            candidate.y + self._snap_peer_offset.y(),
         )
 
     @QtCore.pyqtSlot()
@@ -233,6 +242,9 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
         if event and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if self._drag_position is not None:
+                desired = event.globalPosition().toPoint() - self._drag_position
+                self._snap_on_release(desired)
             self._drag_position = None
             self.releaseMouse()
             self._save_position()
@@ -319,11 +331,17 @@ class UsageRingsWindow(QtWidgets.QWidget):
     def _apply_scale(self) -> None:
         margin_h = int(round(18 * self._scale))
         margin_v = int(round(14 * self._scale))
-        self._layout.setContentsMargins(margin_h, margin_v, margin_h, margin_v)
+        self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(int(round(12 * self._scale)))
         self._rings.apply_scale(self._scale)
-        width = max(int(round(408 * self._scale)), 120 if self._scale < 0.35 else 0)
-        height = max(int(round(470 * self._scale)), 142 if self._scale < 0.35 else 0)
+        width = max(
+            int(round(408 * self._scale)) - 2 * margin_h,
+            (120 - 2 * margin_h) if self._scale < 0.35 else 0,
+        )
+        height = max(
+            int(round(470 * self._scale)) - 2 * margin_v,
+            (142 - 2 * margin_v) if self._scale < 0.35 else 0,
+        )
         self.setMinimumSize(width, height)
         self.resize(width, height)
 
