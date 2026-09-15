@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 # Claude Code stores subscription OAuth credentials in this file on Windows
@@ -24,7 +25,9 @@ def _default_auth_file() -> Path:
 
 DEFAULT_AUTH_FILE = _default_auth_file()
 DEFAULT_BASE_URL = "https://api.anthropic.com"
-DEFAULT_AUTH_BASE_URL = "https://console.anthropic.com"
+# Claude Code's OAuth token endpoint is hosted on the platform domain. The
+# console host used to accept this request, but now commonly returns 403.
+DEFAULT_AUTH_BASE_URL = "https://platform.claude.com"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
 OAUTH_USAGE_BETA = "oauth-2025-04-20"
@@ -213,17 +216,25 @@ def refresh_auth(
     if not isinstance(refresh_token, str) or not refresh_token.strip():
         raise ClaudeUsageError("Claude Code credentials have no refreshToken for renewal")
 
-    payload = json.dumps(
+    # Claude Code sends an OAuth form post. In particular, the endpoint does
+    # not treat the equivalent JSON body as a token refresh request, and the
+    # scope is required for subscription OAuth credentials.
+    payload = urlencode(
         {
             "grant_type": "refresh_token",
             "client_id": OAUTH_CLIENT_ID,
             "refresh_token": refresh_token.strip(),
+            "scope": OAUTH_SCOPE,
         }
     ).encode("utf-8")
     request = Request(
         f"{auth_base_url.rstrip('/')}/v1/oauth/token",
         data=payload,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": "claude-code/2.1.270",
+        },
         method="POST",
     )
     try:
