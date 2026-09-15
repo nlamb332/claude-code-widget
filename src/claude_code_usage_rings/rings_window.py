@@ -524,7 +524,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
     def set_syncing(self, detail: str | None = None) -> None:
         self._stale = True
         self._error = None
-        tooltip = f"{APP_NAME} usage is temporarily rate limited; retrying"
+        tooltip = f"{APP_NAME} usage could not refresh; showing the last data and retrying"
         if detail:
             tooltip = f"{tooltip}\n{detail[:160]}"
         self.setToolTip(tooltip)
