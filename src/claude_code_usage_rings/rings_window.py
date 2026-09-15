@@ -139,6 +139,9 @@ class UsageRingsWindow(QtWidgets.QWidget):
         super().mouseMoveEvent(event)
 
     def _current_window_rect(self) -> tuple[int, int, int, int]:
+        rect = get_window_rect(int(self.winId()))
+        if rect is not None:
+            return rect
         return self.x(), self.y(), self.x() + self.width(), self.y() + self.height()
 
     def _clear_snap_state(self) -> None:
@@ -162,15 +165,16 @@ class UsageRingsWindow(QtWidgets.QWidget):
                 self._clear_snap_state()
             else:
                 self._snap_peer_offset = QtCore.QPoint(
-                    peer_rect[0] - self.x(),
-                    peer_rect[1] - self.y(),
+                    peer_rect[0] - own_rect[0],
+                    peer_rect[1] - own_rect[1],
                 )
 
     def _move_dragged_window(self, desired: QtCore.QPoint) -> None:
+        own_hwnd = int(self.winId())
         if self._snap_peer_hwnd is not None and self._snap_peer_offset is not None:
             peer_rect = get_window_rect(self._snap_peer_hwnd)
             if peer_rect is not None and windows_are_connected(self._current_window_rect(), peer_rect):
-                self.move(desired)
+                move_window(own_hwnd, desired.x(), desired.y())
                 move_window(
                     self._snap_peer_hwnd,
                     desired.x() + self._snap_peer_offset.x(),
@@ -182,16 +186,16 @@ class UsageRingsWindow(QtWidgets.QWidget):
         candidate = find_snap_candidate(
             desired.x(),
             desired.y(),
-            self.width(),
-            self.height(),
-            own_hwnd=int(self.winId()),
+            self._current_window_rect()[2] - self._current_window_rect()[0],
+            self._current_window_rect()[3] - self._current_window_rect()[1],
+            own_hwnd=own_hwnd,
         )
         if candidate is None:
-            self.move(desired)
+            move_window(own_hwnd, desired.x(), desired.y())
             return
 
         peer_rect = get_window_rect(candidate.peer_hwnd)
-        self.move(candidate.x, candidate.y)
+        move_window(own_hwnd, candidate.x, candidate.y)
         if peer_rect is None:
             return
         self._snap_peer_hwnd = candidate.peer_hwnd

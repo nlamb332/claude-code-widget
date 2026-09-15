@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ PEER_WINDOW_TITLES = frozenset(("Claude Usage", "Codex Usage"))
 SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+_DPI_AWARENESS_CONTEXT_UNAWARE = ctypes.c_void_p(-1)
 
 
 class _Rect(ctypes.Structure):
@@ -21,6 +23,35 @@ class _Rect(ctypes.Structure):
         ("right", wintypes.LONG),
         ("bottom", wintypes.LONG),
     ]
+
+
+@contextmanager
+def _logical_window_coordinates():
+    """Make Win32 window geometry use the same logical pixels as Qt.
+
+    Qt uses device-independent coordinates for mouse events and QWidget
+    geometry. On a scaled Windows desktop, a per-monitor-aware process would
+    otherwise receive physical-pixel rectangles from Win32, so snap tests
+    would compare values in different coordinate systems.
+    """
+
+    if sys.platform != "win32":
+        yield
+        return
+
+    set_thread_dpi_context = getattr(ctypes.windll.user32, "SetThreadDpiAwarenessContext", None)
+    if set_thread_dpi_context is None:
+        yield
+        return
+
+    set_thread_dpi_context.argtypes = [wintypes.HANDLE]
+    set_thread_dpi_context.restype = wintypes.HANDLE
+    previous_context = set_thread_dpi_context(_DPI_AWARENESS_CONTEXT_UNAWARE)
+    try:
+        yield
+    finally:
+        if previous_context:
+            set_thread_dpi_context(previous_context)
 
 
 @dataclass(frozen=True)
@@ -38,10 +69,11 @@ def _overlap_ratio(start_a: int, length_a: int, start_b: int, length_b: int) -> 
 def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     if sys.platform != "win32" or not hwnd:
         return None
-    rect = _Rect()
-    if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-        return None
-    return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+    with _logical_window_coordinates():
+        rect = _Rect()
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
 
 
 def _peer_windows(own_hwnd: int) -> list[tuple[int, tuple[int, int, int, int]]]:
@@ -159,14 +191,15 @@ def snap_to_peer(
 def move_window(hwnd: int, x: int, y: int) -> bool:
     if sys.platform != "win32" or not hwnd:
         return False
-    return bool(
-        ctypes.windll.user32.SetWindowPos(
-            hwnd,
-            0,
-            int(x),
-            int(y),
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+    with _logical_window_coordinates():
+        return bool(
+            ctypes.windll.user32.SetWindowPos(
+                hwnd,
+                0,
+                int(x),
+                int(y),
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
         )
-    )
