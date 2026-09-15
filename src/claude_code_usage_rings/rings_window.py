@@ -446,7 +446,12 @@ class UsageRingsCanvas(QtWidgets.QWidget):
             painter.setPen(inner_pen)
             painter.drawArc(inner_rect, 90 * 16, -int(inner_remaining * 3.6 * 16))
 
-        percent_font = QtGui.QFont("Segoe UI", max(16, int(round(30 * self._scale))))
+        percent_size = (
+            max(10, int(round(24 * self._scale)))
+            if not show_full_content
+            else max(16, int(round(30 * self._scale)))
+        )
+        percent_font = QtGui.QFont("Segoe UI", percent_size)
         percent_font.setWeight(QtGui.QFont.Weight.Bold)
         painter.setPen(QtGui.QColor("#ffffff"))
         if show_full_content and inner_model is not None:

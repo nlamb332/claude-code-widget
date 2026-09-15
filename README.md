@@ -95,9 +95,10 @@ Optional arguments:
 - Drag the rings window with the left mouse button. Its position is saved and
   restored when it reappears.
 - The Claude and Codex widgets snap together when the dragged widget comes
-  within 20 pixels of another widget. Left/right placements align their top
-  or bottom edges; top/bottom placements align their left or right edges.
-  Drag farther away to separate them.
+  within 20 pixels of another widget and overlaps it by at least 75% along
+  the alignment axis. Left/right placements align their top or bottom edges;
+  top/bottom placements align their left or right edges. Drag farther away
+  to separate them.
 - Click the window once, then use `Ctrl+-` to make it smaller or `Ctrl+=` /
   `Ctrl++` to make it larger.
 - The app starts at the third-smallest size; press `Ctrl+-` once for the

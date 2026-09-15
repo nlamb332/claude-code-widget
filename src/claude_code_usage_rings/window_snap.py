@@ -5,6 +5,7 @@ import sys
 from ctypes import wintypes
 
 SNAP_DISTANCE = 20
+MIN_OVERLAP_RATIO = 0.75
 PEER_WINDOW_TITLES = frozenset(("Claude Usage", "Codex Usage"))
 
 
@@ -17,6 +18,11 @@ class _Rect(ctypes.Structure):
     ]
 
 
+def _overlap_ratio(start_a: int, length_a: int, start_b: int, length_b: int) -> float:
+    overlap = max(0, min(start_a + length_a, start_b + length_b) - max(start_a, start_b))
+    return overlap / max(1, min(length_a, length_b))
+
+
 def snap_to_peer(
     x: int,
     y: int,
@@ -27,9 +33,11 @@ def snap_to_peer(
 ) -> tuple[int, int]:
     """Snap a dragged widget flush to a nearby peer on any of four sides.
 
-    Side-by-side placements align their top or bottom edges. Stacked
-    placements align their left or right edges. The nearest valid candidate
-    wins, so dragging near a corner can choose either orientation naturally.
+    A candidate must have at least 75% overlap along the axis that will be
+    aligned and have adjoining edges within ``SNAP_DISTANCE``. Side-by-side
+    placements align their top or bottom edges. Stacked placements align
+    their left or right edges. The nearest valid candidate wins, so dragging
+    near a corner can choose either orientation naturally.
     """
 
     if sys.platform != "win32":
@@ -55,29 +63,27 @@ def snap_to_peer(
         peer_left, peer_top = int(rect.left), int(rect.top)
         peer_right, peer_bottom = int(rect.right), int(rect.bottom)
 
-        # Horizontal snapping: left/right sides meet and top/bottom edges line up.
-        for aligned_y in (peer_top, peer_bottom - height):
-            y_distance = abs(y - aligned_y)
-            if y_distance > SNAP_DISTANCE:
-                continue
+        # Horizontal snapping: left/right sides meet and at least 75% of the
+        # vertical span overlaps before the top/bottom edges are aligned.
+        if _overlap_ratio(y, height, peer_top, peer_bottom - peer_top) >= MIN_OVERLAP_RATIO:
+            aligned_y = min((peer_top, peer_bottom - height), key=lambda candidate: abs(y - candidate))
             right_gap = abs((x + width) - peer_left)
             if right_gap <= SNAP_DISTANCE:
-                candidates.append((right_gap + y_distance, peer_left - width, aligned_y))
+                candidates.append((right_gap + abs(y - aligned_y), peer_left - width, aligned_y))
             left_gap = abs(x - peer_right)
             if left_gap <= SNAP_DISTANCE:
-                candidates.append((left_gap + y_distance, peer_right, aligned_y))
+                candidates.append((left_gap + abs(y - aligned_y), peer_right, aligned_y))
 
-        # Vertical snapping: top/bottom sides meet and left/right edges line up.
-        for aligned_x in (peer_left, peer_right - width):
-            x_distance = abs(x - aligned_x)
-            if x_distance > SNAP_DISTANCE:
-                continue
+        # Vertical snapping: top/bottom sides meet and at least 75% of the
+        # horizontal span overlaps before the left/right edges are aligned.
+        if _overlap_ratio(x, width, peer_left, peer_right - peer_left) >= MIN_OVERLAP_RATIO:
+            aligned_x = min((peer_left, peer_right - width), key=lambda candidate: abs(x - candidate))
             bottom_gap = abs((y + height) - peer_top)
             if bottom_gap <= SNAP_DISTANCE:
-                candidates.append((bottom_gap + x_distance, aligned_x, peer_top - height))
+                candidates.append((bottom_gap + abs(x - aligned_x), aligned_x, peer_top - height))
             top_gap = abs(y - peer_bottom)
             if top_gap <= SNAP_DISTANCE:
-                candidates.append((top_gap + x_distance, aligned_x, peer_bottom))
+                candidates.append((top_gap + abs(x - aligned_x), aligned_x, peer_bottom))
 
         return True
 
