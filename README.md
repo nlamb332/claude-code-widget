@@ -4,7 +4,7 @@ A standalone Windows desktop app that displays remaining Claude Code capacity
 in two nested rings. The outer ring is the 5-hour limit, the inner ring is
 the weekly limit, and each ring changes from green to amber to red as
 capacity is used. It is a Claude-branded sibling of the
-[codex-widget](https://github.com/your-account/codex-widget) project, built from
+[codex-widget](https://github.com/nlamb332/codex-widget) project, built from
 the same design.
 
 The app follows the Claude desktop window: it appears when Claude is
@@ -24,8 +24,7 @@ Clone the public repository, create an isolated Python environment, and
 install the widget:
 
 ```powershell
-# Replace your-account with the GitHub owner of this repository.
-git clone https://github.com/your-account/claude-code-widget.git
+git clone https://github.com/nlamb332/claude-code-widget.git
 cd claude-code-widget
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -69,6 +68,31 @@ repository as the working directory. It pulls the latest `main` from GitHub,
 then hands off to the watchdog, which starts the app in the background and
 restarts it after an unexpected exit. Update results are logged to
 `%LOCALAPPDATA%\ClaudeCodeUsageRings\update.log`.
+
+### Optional: one shortcut for both usage widgets
+
+If you also use [Codex Usage Rings](https://github.com/nlamb332/codex-widget),
+you can create one Desktop shortcut that starts whichever widget is not already
+running. Install both widgets as described above, then set the two repository
+paths and run the shortcut installer from either repository:
+
+```powershell
+$codexRepository = (Resolve-Path 'C:\path\to\codex-widget').Path
+$claudeRepository = (Resolve-Path 'C:\path\to\claude-code-widget').Path
+$launcherRepository = $codexRepository # Or use $claudeRepository.
+& (Join-Path $launcherRepository 'scripts\install_both_usage_widgets_shortcut.ps1') `
+  -CodexRepository $codexRepository `
+  -ClaudeRepository $claudeRepository
+```
+
+The installer creates or updates **Start Codex and Claude Usage Widgets** on the
+Desktop and applies the included dual-ring icon. The shortcut uses each
+repository's `.venv\Scripts\pythonw.exe` and `scripts\start_with_update.py`;
+clicking it skips any widget whose supervisor is already running. This is
+opt-in and does not change either widget's individual startup behavior. To
+preview which widgets would start without launching them, run
+`scripts\start_both_usage_rings.ps1` with the same two repository paths and
+`-WhatIf`.
 
 ## Usage
 
