@@ -310,17 +310,20 @@ def find_claude_cli() -> str | None:
     if on_path:
         return on_path
 
+    # The desktop app keeps its bundled CLI one folder per version; newer
+    # releases nest it one level deeper, under a build-hash folder.
+    bundled_patterns = ("*/claude.exe", "*/*/claude.exe")
     candidates: list[Path] = []
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
-        # The MSIX-packaged desktop app keeps its bundled CLI in the package's
-        # virtualized roaming directory, one folder per version.
-        candidates.extend(
-            Path(local_app_data, "Packages").glob("Claude_*/LocalCache/Roaming/Claude/claude-code/*/claude.exe")
-        )
+        # The MSIX-packaged app uses the package's virtualized roaming directory.
+        packaged = Path(local_app_data, "Packages")
+        for pattern in bundled_patterns:
+            candidates.extend(packaged.glob(f"Claude_*/LocalCache/Roaming/Claude/claude-code/{pattern}"))
     app_data = os.environ.get("APPDATA")
     if app_data:
-        candidates.extend(Path(app_data, "Claude", "claude-code").glob("*/claude.exe"))
+        for pattern in bundled_patterns:
+            candidates.extend(Path(app_data, "Claude", "claude-code").glob(pattern))
     candidates.append(Path.home() / ".local" / "bin" / "claude.exe")
     existing = [candidate for candidate in candidates if candidate.is_file()]
     if not existing:
@@ -329,10 +332,12 @@ def find_claude_cli() -> str | None:
 
 
 def _cli_version_key(path: Path) -> tuple[int, ...]:
-    try:
-        return tuple(int(part) for part in path.parent.name.split("."))
-    except ValueError:
-        return (0,)
+    for folder in (path.parent, path.parent.parent):
+        try:
+            return tuple(int(part) for part in folder.name.split("."))
+        except ValueError:
+            continue
+    return (0,)
 
 
 def parse_usage_payload(payload: dict[str, Any], now: int | None = None) -> ClaudeUsage:
