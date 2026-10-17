@@ -8,14 +8,10 @@ from typing import Optional
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .host_window import get_claude_window_state
-from .account_usage import (
-    ClaudeNetworkError,
-    ClaudeUsageError,
-    fetch_usage_with_auth_refresh,
-    parse_usage_payload,
-)
+from .host_window import get_host_window_state
 from .models import UsageCardModel, build_card_models
+from .providers import Provider
+from .usage import NetworkError, UsageError
 from .window_snap import (
     find_connected_peer,
     find_snap_candidate,
@@ -23,10 +19,6 @@ from .window_snap import (
     move_window,
     windows_are_connected,
 )
-
-# Shown in the header, window title, and tray tooltip. Change this one
-# constant to rebrand the widget.
-APP_NAME = "Claude"
 
 # Keep two extra Ctrl+- steps available for a compact desktop footprint.
 MIN_SCALE = 0.25
@@ -42,11 +34,11 @@ MAX_REFRESH_BACKOFF_SECONDS = 15 * 60
 # cadence instead of backing off. The rings recover soon after a reconnect.
 OFFLINE_RETRY_SECONDS = 30
 
-LOGGER = logging.getLogger("claude_code_usage_rings")
+LOGGER = logging.getLogger("usage_rings")
 
 
 class UsageRingsWindow(QtWidgets.QWidget):
-    """A compact, always-on-top pair of usage rings that follows Claude."""
+    """A compact, always-on-top pair of usage rings that follows its provider's app."""
 
     usage_changed = QtCore.pyqtSignal(object)
     glass_mode_changed = QtCore.pyqtSignal(bool)
@@ -55,12 +47,14 @@ class UsageRingsWindow(QtWidgets.QWidget):
     def __init__(
         self,
         *,
+        provider: Provider,
         auth_file,
         base_url: str,
         refresh_seconds: int = 60,
         parent: Optional[QtWidgets.QWidget] = None,
     ) -> None:
         super().__init__(parent)
+        self._provider = provider
         self._auth_file = auth_file
         self._base_url = base_url
         self._drag_position: QtCore.QPoint | None = None
@@ -69,12 +63,12 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._thread: QtCore.QThread | None = None
         self._worker: UsageFetchWorker | None = None
         self._scale = DEFAULT_SCALE
-        self._claude_state = None
+        self._host_state = None
         self._position_initialized = False
-        self._settings = QtCore.QSettings(APP_NAME, "UsageRings")
+        self._settings = QtCore.QSettings(provider.app_name, "UsageRings")
         self._glass_mode = bool(self._settings.value("window/glass", False, type=bool))
 
-        self._rings = UsageRingsCanvas(parent=self)
+        self._rings = UsageRingsCanvas(app_name=provider.app_name, parent=self)
         self._rings.installEventFilter(self)
         self._layout = QtWidgets.QHBoxLayout(self)
         # The painted canvas is the complete visible card. Keeping the
@@ -85,7 +79,7 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._layout.setSpacing(12)
         self._layout.addWidget(self._rings)
 
-        self.setWindowTitle(f"{APP_NAME} Usage")
+        self.setWindowTitle(provider.window_title)
         self.setWindowFlags(
             QtCore.Qt.WindowType.FramelessWindowHint
             | QtCore.Qt.WindowType.WindowStaysOnTopHint
@@ -128,11 +122,11 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
         self._lifecycle_timer = QtCore.QTimer(self)
         self._lifecycle_timer.setInterval(500)
-        self._lifecycle_timer.timeout.connect(self._sync_with_claude)
+        self._lifecycle_timer.timeout.connect(self._sync_with_host)
 
         self._apply_scale()
         QtCore.QTimer.singleShot(0, self._place_initially)
-        QtCore.QTimer.singleShot(0, self._sync_with_claude)
+        QtCore.QTimer.singleShot(0, self._sync_with_host)
         QtCore.QTimer.singleShot(0, self.refresh)
         self._usage_timer.start()
         self._lifecycle_timer.start()
@@ -280,23 +274,33 @@ class UsageRingsWindow(QtWidgets.QWidget):
         super().closeEvent(event)
 
     @QtCore.pyqtSlot()
-    def _sync_with_claude(self) -> None:
-        state = get_claude_window_state()
+    def _sync_with_host(self) -> None:
+        state = get_host_window_state(self._provider.host)
         should_show = state.should_show_widget
-        if should_show and (not self.isVisible() or self.isMinimized()):
+        if should_show and (not self._native_window_visible() or self.isMinimized()):
             self.showNormal()
             self._place_initially()
             self._raise_without_focus()
         elif not should_show and self.isVisible():
             self.hide()
-        self._claude_state = state
+        self._host_state = state
+
+    def _native_window_visible(self) -> bool:
+        """Return the real desktop visibility, including external hide calls."""
+
+        if not self.isVisible():
+            return False
+        if sys.platform != "win32":
+            return True
+        hwnd = int(self.winId())
+        return bool(ctypes.windll.user32.IsWindowVisible(hwnd))
 
     @QtCore.pyqtSlot()
     def refresh(self) -> None:
         if self._thread is not None:
             return
         self._thread = QtCore.QThread(self)
-        self._worker = UsageFetchWorker(auth_file=self._auth_file, base_url=self._base_url)
+        self._worker = UsageFetchWorker(provider=self._provider, auth_file=self._auth_file, base_url=self._base_url)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.loaded.connect(self._handle_usage_loaded)
@@ -447,14 +451,14 @@ class UsageRingsWindow(QtWidgets.QWidget):
         self._settings.sync()
 
     def _raise_without_focus(self) -> None:
-        """Put the frameless widget above Claude without stealing keyboard focus."""
+        """Put the frameless widget above the host app without stealing keyboard focus."""
 
         self.raise_()
         if sys.platform != "win32":
             return
         hwnd = int(self.winId())
         # HWND_TOPMOST plus SWP_NOACTIVATE keeps the usage card visible over a
-        # normal Claude window without moving focus away from the text box.
+        # normal host window without moving focus away from the text box.
         ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0053)
 
 
@@ -476,8 +480,9 @@ def _status_label(models: object, stale: bool, error: str | None) -> str:
 class UsageRingsCanvas(QtWidgets.QWidget):
     """Paint the 5-hour ring around the weekly ring."""
 
-    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+    def __init__(self, *, app_name: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
+        self._app_name = app_name
         self._scale = 1.0
         self._models: tuple[UsageCardModel, UsageCardModel] | None = None
         self._error: str | None = None
@@ -486,8 +491,8 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         self._last_refreshed: datetime | None = None
         self.setMinimumSize(372, 412)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-        self.setAccessibleName(f"{APP_NAME} usage")
-        self.setAccessibleDescription(f"Remaining usage for the 5-hour and weekly {APP_NAME} limits")
+        self.setAccessibleName(f"{self._app_name} usage")
+        self.setAccessibleDescription(f"Remaining usage for the 5-hour and weekly {self._app_name} limits")
 
     def apply_scale(self, scale: float) -> None:
         self._scale = scale
@@ -524,7 +529,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
     def set_syncing(self, detail: str | None = None) -> None:
         self._stale = True
         self._error = None
-        tooltip = f"{APP_NAME} usage could not refresh; showing the last data and retrying"
+        tooltip = f"{self._app_name} usage could not refresh; showing the last data and retrying"
         if detail:
             tooltip = f"{tooltip}\n{detail[:160]}"
         self.setToolTip(tooltip)
@@ -534,7 +539,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         self._models = None
         self._error = message[:80]
         self._stale = False
-        self.setToolTip(f"{APP_NAME} usage unavailable: {self._error}")
+        self.setToolTip(f"{self._app_name} usage unavailable: {self._error}")
         self.update()
 
     def paintEvent(self, event: QtGui.QPaintEvent | None) -> None:  # noqa: N802
@@ -600,7 +605,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
             painter.drawText(
                 QtCore.QRectF(header_rect.left(), header_rect.top(), title_width, header_rect.height()),
                 QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
-                f"{APP_NAME} usage",
+                f"{self._app_name} usage",
             )
 
             painter.setFont(status_font)
@@ -781,7 +786,7 @@ class UsageRingsCanvas(QtWidgets.QWidget):
         painter.drawText(
             QtCore.QRectF(header_rect.left(), header_rect.top(), title_width, header_rect.height()),
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
-            f"{APP_NAME} usage",
+            f"{self._app_name} usage",
         )
         painter.setFont(status_font)
         painter.setPen(QtGui.QColor(status_color))
@@ -896,20 +901,21 @@ class UsageFetchWorker(QtCore.QObject):
     failed = QtCore.pyqtSignal(str, bool)
     finished = QtCore.pyqtSignal()
 
-    def __init__(self, *, auth_file, base_url: str) -> None:
+    def __init__(self, *, provider: Provider, auth_file, base_url: str) -> None:
         super().__init__()
+        self._provider = provider
         self._auth_file = auth_file
         self._base_url = base_url
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
-            payload = fetch_usage_with_auth_refresh(self._auth_file, self._base_url, timeout=20.0)
-            usage = parse_usage_payload(payload)
+            payload = self._provider.fetch_usage(self._auth_file, self._base_url, 20.0)
+            usage = self._provider.parse_usage(payload)
             self.loaded.emit(build_card_models(five_hour=usage.five_hour, weekly=usage.weekly))
-        except ClaudeNetworkError as exc:
+        except NetworkError as exc:
             self.failed.emit(str(exc), True)
-        except ClaudeUsageError as exc:
+        except UsageError as exc:
             self.failed.emit(str(exc), False)
         except Exception as exc:  # noqa: BLE001 - a silent worker is the worse failure
             # Anything unexpected here previously escaped the slot, so no

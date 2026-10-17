@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import logging
 import os
@@ -11,29 +10,21 @@ from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .account_usage import (
-    DEFAULT_AUTH_FILE,
-    DEFAULT_BASE_URL,
-    ClaudeUsageError,
-    fetch_usage_with_auth_refresh,
-    parse_usage_payload,
-)
+from . import USER_QUIT_EXIT_CODE, single_instance
 from .models import UsageCardModel
-
-from .rings_window import APP_NAME, UsageRingsWindow
-
-# The watchdog stops supervising when the widget exits with this code, so a
-# deliberate quit is not undone by an automatic restart.
-USER_QUIT_EXIT_CODE = 10
+from .providers import PROVIDERS, Provider, get_provider
+from .rings_window import UsageRingsWindow
+from .usage import UsageError
 
 
 class UsageRingsTray(QtWidgets.QSystemTrayIcon):
     """Status icon and small control menu for the borderless rings window."""
 
-    def __init__(self, window: UsageRingsWindow, app: QtWidgets.QApplication) -> None:
+    def __init__(self, window: UsageRingsWindow, app: QtWidgets.QApplication, *, app_name: str) -> None:
         super().__init__(app)
         self._window = window
-        self.setToolTip(f"{APP_NAME} Usage Rings")
+        self._app_name = app_name
+        self.setToolTip(f"{app_name} Usage Rings")
         self._window.setWindowIcon(self._make_icon(None, None))
         self.setContextMenu(self._build_menu())
         self.activated.connect(self._handle_activation)
@@ -83,11 +74,11 @@ class UsageRingsTray(QtWidgets.QSystemTrayIcon):
         self._window.setWindowIcon(icon)
         if outer is not None and inner is not None:
             self.setToolTip(
-                f"{APP_NAME} Usage Rings | 5-hour {outer.percent_remaining}% remaining; "
+                f"{self._app_name} Usage Rings | 5-hour {outer.percent_remaining}% remaining; "
                 f"Weekly {inner.percent_remaining}% remaining"
             )
         else:
-            self.setToolTip(f"{APP_NAME} Usage Rings | waiting for usage data")
+            self.setToolTip(f"{self._app_name} Usage Rings | waiting for usage data")
 
     @staticmethod
     def _make_icon(outer: UsageCardModel | None, inner: UsageCardModel | None) -> QtGui.QIcon:
@@ -135,9 +126,20 @@ def _remaining_color(percent: int) -> QtGui.QColor:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=f"Standalone Windows app for {APP_NAME} usage rings.")
-    parser.add_argument("--auth-file", type=Path, default=Path(os.environ.get("CLAUDE_AUTH_FILE", DEFAULT_AUTH_FILE)))
-    parser.add_argument("--base-url", default=os.environ.get("CLAUDE_USAGE_BASE_URL", DEFAULT_BASE_URL))
+    parser = argparse.ArgumentParser(
+        prog="usage-rings",
+        description="Standalone Windows app for Claude Code and Codex usage rings. "
+        "Run `usage-rings setup` to choose which widgets to enable.",
+    )
+    parser.add_argument(
+        "--provider",
+        required=True,
+        choices=list(PROVIDERS),
+        help="Which service's usage to show. Each provider runs as its own process.",
+    )
+    # Defaults depend on --provider, so they are resolved after parsing.
+    parser.add_argument("--auth-file", type=Path, default=None, help="Override the provider's credentials file.")
+    parser.add_argument("--base-url", default=None, help="Override the provider's usage API base URL.")
     parser.add_argument("--refresh-seconds", type=int, default=60)
     parser.add_argument(
         "--start-visible",
@@ -156,22 +158,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Run one usage refresh in the foreground, print the result, and exit.",
     )
     args = parser.parse_args(argv)
-    _configure_logging(args.log_file, verbose=args.diagnose)
+    provider = get_provider(args.provider)
+    auth_file = args.auth_file or Path(os.environ.get(provider.auth_file_env, provider.default_auth_file))
+    base_url = args.base_url or os.environ.get(provider.base_url_env, provider.default_base_url)
+    _configure_logging(provider, args.log_file, verbose=args.diagnose)
     if args.diagnose:
-        return _diagnose(args.auth_file, args.base_url)
-    instance_mutex = _acquire_single_instance()
+        return _diagnose(provider, auth_file, base_url)
+    instance_mutex = single_instance.acquire(provider.instance_mutex)
     if instance_mutex == 0:
         return 0
 
     app = QtWidgets.QApplication(sys.argv[:1])
-    # Hiding the rings while Claude is closed must not terminate the listener.
+    # Hiding the rings while the host app is closed must not terminate the listener.
     app.setQuitOnLastWindowClosed(False)
     widget = UsageRingsWindow(
-        auth_file=args.auth_file,
-        base_url=args.base_url,
+        provider=provider,
+        auth_file=auth_file,
+        base_url=base_url,
         refresh_seconds=args.refresh_seconds,
     )
-    tray = UsageRingsTray(widget, app)
+    tray = UsageRingsTray(widget, app, app_name=provider.app_name)
     tray.show()
     app.aboutToQuit.connect(tray.hide)
     widget.quit_requested.connect(lambda: _quit(app, widget))
@@ -181,9 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # Resolve the initial state before entering the event loop. The timer
         # continues polling, but startup no longer depends on its first tick
-        # to make the widget visible beside an already-open Claude window.
-        widget._sync_with_claude()
-    app.aboutToQuit.connect(lambda: _release_single_instance(instance_mutex))
+        # to make the widget visible beside an already-open host window.
+        widget._sync_with_host()
+    app.aboutToQuit.connect(lambda: single_instance.release(instance_mutex))
     return app.exec()
 
 
@@ -194,20 +200,20 @@ def _quit(app: QtWidgets.QApplication, widget: UsageRingsWindow) -> None:
     app.exit(USER_QUIT_EXIT_CODE)
 
 
-def _default_log_file() -> Path:
+def _default_log_file(provider: Provider) -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME")
     root = Path(base) if base else Path.home() / ".cache"
-    return root / "ClaudeCodeUsageRings" / "usage.log"
+    return root / provider.log_dir_name / "usage.log"
 
 
-def _configure_logging(log_file: Path | None, *, verbose: bool) -> None:
+def _configure_logging(provider: Provider, log_file: Path | None, *, verbose: bool) -> None:
     """Give every refresh failure somewhere to land.
 
     The widget previously reported failures only through the header badge, so
     a refresh that quietly gave up left nothing to inspect afterwards.
     """
 
-    logger = logging.getLogger("claude_code_usage_rings")
+    logger = logging.getLogger("usage_rings")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.propagate = False
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -217,7 +223,7 @@ def _configure_logging(log_file: Path | None, *, verbose: bool) -> None:
         stream.setFormatter(formatter)
         logger.addHandler(stream)
 
-    target = log_file or _default_log_file()
+    target = log_file or _default_log_file(provider)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(target, maxBytes=256_000, backupCount=2, encoding="utf-8")
@@ -228,14 +234,15 @@ def _configure_logging(log_file: Path | None, *, verbose: bool) -> None:
     logger.info("logging to %s", target)
 
 
-def _diagnose(auth_file: Path, base_url: str) -> int:
+def _diagnose(provider: Provider, auth_file: Path, base_url: str) -> int:
     """Print exactly what a refresh does, so a stuck badge can be explained."""
 
+    print(f"provider  : {provider.key}")
     print(f"auth file : {auth_file}")
     print(f"base url  : {base_url}")
     try:
-        payload = fetch_usage_with_auth_refresh(auth_file, base_url, timeout=20.0)
-    except ClaudeUsageError as exc:
+        payload = provider.fetch_usage(auth_file, base_url, 20.0)
+    except UsageError as exc:
         print(f"FAILED    : {exc}")
         return 1
     except Exception as exc:  # noqa: BLE001
@@ -244,34 +251,13 @@ def _diagnose(auth_file: Path, base_url: str) -> int:
 
     print("payload   :")
     print(json.dumps(payload, indent=2)[:4000])
-    usage = parse_usage_payload(payload)
+    usage = provider.parse_usage(payload)
     print(f"5-hour    : {usage.five_hour}")
     print(f"weekly    : {usage.weekly}")
     if usage.five_hour is None and usage.weekly is None:
         print("NOTE      : the response parsed but contained no recognized usage windows.")
         return 1
     return 0
-
-
-def _acquire_single_instance() -> int | None:
-    """Keep startup and manual launches from creating duplicate widgets."""
-
-    if sys.platform != "win32":
-        return None
-    kernel32 = ctypes.windll.kernel32
-    mutex = kernel32.CreateMutexW(None, True, "Local\\ClaudeCodeUsageRings")
-    if not mutex:
-        return None
-    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        kernel32.CloseHandle(mutex)
-        return 0
-    return mutex
-
-
-def _release_single_instance(mutex: int | None) -> None:
-    if mutex:
-        ctypes.windll.kernel32.ReleaseMutex(mutex)
-        ctypes.windll.kernel32.CloseHandle(mutex)
 
 
 if __name__ == "__main__":

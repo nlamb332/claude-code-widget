@@ -6,10 +6,14 @@ from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
 
+from .providers import PROVIDERS
+
 SNAP_DISTANCE = 20
 MIN_OVERLAP_RATIO = 0.75
 CONNECTED_TOLERANCE = 3
-PEER_WINDOW_TITLES = frozenset(("Claude Usage", "Codex Usage"))
+# Each provider runs in its own process, so snapping finds its peers by the
+# window title the other process gave its widget.
+PEER_WINDOW_TITLES = frozenset(provider.window_title for provider in PROVIDERS.values())
 SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
