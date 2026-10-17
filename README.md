@@ -254,6 +254,12 @@ minimized, and closed states without a second manual launch.
   top-level window is required: closing Codex hides the rings and opening it
   brings them back.
 
+With multiple virtual desktops, a widget shows only on the desktop that holds
+its app's window and follows it when you switch. The widget is a tool window,
+which Windows would otherwise show everywhere, so each poll also asks DWM
+whether the app's windows are cloaked (how Windows hides windows that live on
+another desktop) and hides the rings when they are.
+
 ## Authentication and data
 
 Each widget reads the local credentials file its CLI maintains:

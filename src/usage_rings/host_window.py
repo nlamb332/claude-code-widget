@@ -17,6 +17,9 @@ class HostWindowState:
     running: bool
     window_found: bool
     minimized: bool
+    # True when every host window is minimized or cloaked and at least one is
+    # cloaked, i.e. the app lives on another virtual desktop.
+    on_other_desktop: bool = False
     # Whether a running process without a visible window counts as closed.
     # See HostWindowSpec.require_window for why the providers differ.
     window_required: bool = False
@@ -25,6 +28,10 @@ class HostWindowState:
     def should_show_widget(self) -> bool:
         if not self.supported:
             return True
+        # The widget is a Tool window, which Windows shows on every virtual
+        # desktop, so follow the host explicitly: hide while it is elsewhere.
+        if self.on_other_desktop:
+            return False
         if self.window_required:
             # A background helper can outlive the desktop shell. Require a
             # matching top-level window so closing the app hides the rings and
@@ -59,13 +66,32 @@ def get_host_window_state(spec: HostWindowSpec) -> HostWindowState:
 
     windows = _host_windows(spec, process_ids)
     minimized = bool(windows) and all(_USER32.IsIconic(hwnd) for hwnd in windows)
+    cloaked = [_is_cloaked(hwnd) for hwnd in windows]
+    # Only visible-or-iconic windows are collected, so a cloaked one is a real
+    # window sitting on another virtual desktop, not a hidden helper.
+    on_other_desktop = any(cloaked) and all(
+        c or _USER32.IsIconic(hwnd) for c, hwnd in zip(cloaked, windows)
+    )
     return HostWindowState(
         supported=True,
         running=True,
         window_found=bool(windows),
         minimized=minimized,
+        on_other_desktop=on_other_desktop,
         window_required=spec.require_window,
     )
+
+
+def _is_cloaked(hwnd: int) -> bool:
+    """Whether DWM hides the window, as it does for other virtual desktops."""
+
+    cloaked = ctypes.c_uint()
+    # DWMWA_CLOAKED = 14. A non-zero HRESULT means the query failed; treat that
+    # as "not cloaked" so the widget errs towards staying visible.
+    result = _DWMAPI.DwmGetWindowAttribute(
+        ctypes.c_void_p(hwnd), 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+    )
+    return result == 0 and cloaked.value != 0
 
 
 def _host_process_ids(spec: HostWindowSpec) -> set[int]:
@@ -135,6 +161,8 @@ class _ProcessEntry32W(ctypes.Structure):
 if sys.platform == "win32":
     _KERNEL32 = ctypes.windll.kernel32
     _USER32 = ctypes.windll.user32
+    _DWMAPI = ctypes.windll.dwmapi
 else:
     _KERNEL32 = None
     _USER32 = None
+    _DWMAPI = None
