@@ -15,7 +15,7 @@ for path in (PROJECT_ROOT, SRC_DIR):
     if value not in sys.path:
         sys.path.insert(0, value)
 
-from claude_code_usage_rings.app import main
+from usage_rings.app import main
 
 
 class _StartupInfo(ctypes.Structure):
