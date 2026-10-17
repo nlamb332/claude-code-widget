@@ -13,6 +13,8 @@ from .models import UsageCardModel, build_card_models
 from .providers import Provider
 from .usage import NetworkError, UsageError
 from .window_snap import (
+    CONNECTED_TOLERANCE,
+    SNAP_DISTANCE,
     find_connected_peer,
     find_snap_candidate,
     get_window_rect,
@@ -142,6 +144,9 @@ class UsageRingsWindow(QtWidgets.QWidget):
             if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
                 self.mouseReleaseEvent(event)  # type: ignore[arg-type]
                 return True
+            if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
+                self.mouseDoubleClickEvent(event)  # type: ignore[arg-type]
+                return True
         return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
@@ -239,23 +244,36 @@ class UsageRingsWindow(QtWidgets.QWidget):
     def _unsnap(self) -> None:
         self._refresh_snap_peer()
         peer_rect = get_window_rect(self._snap_peer_hwnd) if self._snap_peer_hwnd is not None else None
-        new_x, new_y = self.x(), self.y()
+        own_left, own_top, own_right, own_bottom = self._current_window_rect()
+        new_x, new_y = own_left, own_top
         if peer_rect is not None:
-            own_left, own_top, own_right, own_bottom = self._current_window_rect()
             peer_left, peer_top, peer_right, peer_bottom = peer_rect
-            separation = 24
-            if abs(own_right - peer_left) <= 3:
+            # Well beyond SNAP_DISTANCE so a later plain click (whose release
+            # re-runs snap detection) cannot pull the pair back together.
+            separation = 2 * SNAP_DISTANCE
+            if abs(own_right - peer_left) <= CONNECTED_TOLERANCE:
                 new_x -= separation
-            elif abs(own_left - peer_right) <= 3:
+            elif abs(own_left - peer_right) <= CONNECTED_TOLERANCE:
                 new_x += separation
-            elif abs(own_bottom - peer_top) <= 3:
+            elif abs(own_bottom - peer_top) <= CONNECTED_TOLERANCE:
                 new_y -= separation
-            elif abs(own_top - peer_bottom) <= 3:
+            elif abs(own_top - peer_bottom) <= CONNECTED_TOLERANCE:
                 new_y += separation
         self._clear_snap_state()
-        if (new_x, new_y) != (self.x(), self.y()):
-            self.move(new_x, new_y)
+        if (new_x, new_y) != (own_left, own_top):
+            move_window(int(self.winId()), new_x, new_y)
         self._save_position()
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
+        if event and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # The click's press/release already ran; make sure nothing keeps
+            # dragging and the trailing release cannot snap again.
+            self._drag_position = None
+            self.releaseMouse()
+            self._unsnap()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent | None) -> None:  # noqa: N802
         if event and event.button() == QtCore.Qt.MouseButton.LeftButton:

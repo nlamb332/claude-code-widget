@@ -151,8 +151,9 @@ Optional arguments:
   overlaps at least 75% along the alignment axis. The visible card borders
   touch when snapped. Left/right placements align their top or bottom edges;
   top/bottom placements align their left or right edges. Once snapped,
-  dragging either card moves the connected pair together. Press `Ctrl+S` while
-  a widget is focused to separate the pair.
+  dragging either card moves the connected pair together. Double-click a
+  snapped widget to separate the pair (`Ctrl+S` also works while a widget is
+  focused).
 - Click the window once, then use `Ctrl+-` to make it smaller or `Ctrl+=` /
   `Ctrl++` to make it larger.
 - The app starts at the third-smallest size; press `Ctrl+-` once for the
