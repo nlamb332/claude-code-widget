@@ -1,2 +1,2 @@
-# Runtime dependency for Claude Code Usage Rings
+# Runtime dependency for Usage Rings
 PyQt6>=6.6

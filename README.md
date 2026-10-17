@@ -1,27 +1,26 @@
-# Claude Code Usage Rings
+# Usage Rings
 
-A standalone Windows desktop app that displays remaining Claude Code capacity
-in two nested rings. The outer ring is the 5-hour limit, the inner ring is
-the weekly limit, and each ring changes from green to amber to red as
-capacity is used. It is a Claude-branded sibling of the
-[codex-widget](https://github.com/nlamb332/codex-widget) project, built from
-the same design.
+A standalone Windows desktop app that displays remaining Claude Code and Codex
+capacity in two nested rings. The outer ring is the 5-hour limit, the inner
+ring is the weekly limit, and each ring changes from green to amber to red as
+capacity is used. You choose which widgets to run: Claude Code, Codex, or both.
 
-The app follows the Claude desktop window: it appears when Claude is
-available, hides when Claude is minimized or closed, restores its last
-position, and keeps running across Claude restarts through a small watchdog
-process.
+Each widget follows its desktop app: it appears when the app is available,
+hides when the app is minimized or closed, restores its last position, and
+keeps running across restarts through a small watchdog process. Each widget
+runs as its own process, so the two can be snapped together or used alone.
 
 ## Requirements
 
 - Windows 10 or 11
 - Python 3.10 or newer on `PATH` (or available through the `py` launcher)
-- Claude Code CLI signed in to a Claude.ai account
+- For the Claude widget: Claude Code signed in to a Claude.ai account
+- For the Codex widget: the Codex desktop app (part of the ChatGPT app) signed in
 
-## Installation on another Windows system
+## Installation
 
-Clone the public repository, create an isolated Python environment, and
-install the widget:
+Clone the repository, create an isolated Python environment, and install the
+app:
 
 ```powershell
 git clone https://github.com/nlamb332/claude-code-widget.git
@@ -32,91 +31,109 @@ python -m venv .venv
 ```
 
 If `python` is not available, replace it with `py -3.11` (or another
-installed Python 3.10+ version). Sign in to Claude Code before launching:
+installed Python 3.10+ version).
 
-If Claude Code is not installed yet, install the official native Windows
-client first (see the [Claude Code setup guide](https://code.claude.com/docs/en/setup)):
+Sign in to whichever services you want to show:
 
-```powershell
-irm https://claude.ai/install.ps1 | iex
-```
+- **Claude Code.** If it is not installed yet, install the official native
+  Windows client first (see the
+  [Claude Code setup guide](https://code.claude.com/docs/en/setup)):
 
-```powershell
-claude auth login --claudeai
-```
+  ```powershell
+  irm https://claude.ai/install.ps1 | iex
+  claude auth login --claudeai
+  ```
 
-Confirm that the credentials file exists before starting the widget:
+  The widget reads the credential at `%USERPROFILE%\.claude\.credentials.json`.
+  If Claude Code uses a custom profile, set `CLAUDE_AUTH_FILE` or the relevant
+  Claude Code configuration directory before launching.
 
-```powershell
-Test-Path "$env:USERPROFILE\.claude\.credentials.json"
-```
+- **Codex.** Install the ChatGPT desktop app, which includes Codex, from the
+  [ChatGPT download page](https://chatgpt.com/download/), open Codex, and sign
+  in (or run `codex login`). The widget reads the credential at
+  `%USERPROFILE%\.codex\auth.json`.
 
-The widget reads the local credential at
-`%USERPROFILE%\.claude\.credentials.json`; never copy that file into this
-repository. If Claude Code uses a custom profile, set `CLAUDE_AUTH_FILE` or
-the relevant Claude Code configuration directory before launching.
+Never copy either credential file into this repository.
 
-To verify the installation immediately:
+## Setup
 
-```powershell
-.venv\Scripts\python.exe scripts\launch_usage_rings.py --start-visible
-```
-
-For automatic startup, create a desktop shortcut and a Startup shortcut that
-run `pythonw.exe` with `scripts\start_with_update.py` as the argument and this
-repository as the working directory. It pulls the latest `main` from GitHub,
-then hands off to the watchdog, which starts the app in the background and
-restarts it after an unexpected exit. Update results are logged to
-`%LOCALAPPDATA%\ClaudeCodeUsageRings\update.log`.
-
-### Optional: one shortcut for both usage widgets
-
-If you also use [Codex Usage Rings](https://github.com/nlamb332/codex-widget),
-you can create one Desktop shortcut that starts whichever widget is not already
-running. Install both widgets as described above, then set the two repository
-paths and run the shortcut installer from either repository:
+Run setup once after installing:
 
 ```powershell
-$codexRepository = (Resolve-Path 'C:\path\to\codex-widget').Path
-$claudeRepository = (Resolve-Path 'C:\path\to\claude-code-widget').Path
-$launcherRepository = $codexRepository # Or use $claudeRepository.
-& (Join-Path $launcherRepository 'scripts\install_both_usage_widgets_shortcut.ps1') `
-  -CodexRepository $codexRepository `
-  -ClaudeRepository $claudeRepository
+.venv\Scripts\python.exe scripts\setup.py
 ```
 
-The installer creates or updates **Start Codex and Claude Usage Widgets** on the
-Desktop and applies the included dual-ring icon. The shortcut uses each
-repository's `.venv\Scripts\pythonw.exe` and `scripts\start_with_update.py`;
-clicking it skips any widget whose supervisor is already running. This is
-opt-in and does not change either widget's individual startup behavior. To
-preview which widgets would start without launching them, run
-`scripts\start_both_usage_rings.ps1` with the same two repository paths and
-`-WhatIf`.
+It asks which widgets to enable (Claude Code, Codex, or both), checks that each
+one is signed in using the same credential paths the widgets read at runtime,
+and writes `%LOCALAPPDATA%\UsageRings\config.json`, for example:
+
+```json
+{ "providers": ["claude", "codex"] }
+```
+
+It then offers to create a Desktop shortcut and a Startup-folder shortcut named
+**Usage Rings** (using `assets\usage-widgets.ico`), and to start the widgets
+right away. Run it again any time to change the selection. `usage-rings setup`
+does the same thing once the package is installed.
+
+Setup also takes flags, so it can be scripted:
+
+```text
+--providers claude,codex    Widgets to enable (claude, codex, or all)
+--no-shortcuts              Create neither shortcut
+--desktop-shortcut / --no-desktop-shortcut
+--startup-shortcut / --no-startup-shortcut
+--start / --no-start        Start the widgets when setup finishes
+--desktop-dir PATH          Create the Desktop shortcut here instead
+--startup-dir PATH          Create the Startup shortcut here instead
+--non-interactive           Never prompt
+```
+
+When it cannot prompt (input is redirected or `--non-interactive` is given),
+`--providers` is required and every unanswered question defaults to "no".
+Set `USAGE_RINGS_CONFIG_DIR` to keep the config somewhere other than
+`%LOCALAPPDATA%\UsageRings`, for example when testing.
+
+## Startup
+
+Both shortcuts run `pythonw.exe scripts\start_with_update.py` from this
+repository. That script pulls the latest `main` from GitHub, reads the config,
+and starts one watchdog per enabled widget in the background. The watchdog
+starts the app and restarts it after an unexpected exit. A widget whose
+watchdog is already running is left alone, so clicking the shortcut twice is
+harmless. If there is no config yet, it opens setup instead of guessing.
+Update results are logged to `%LOCALAPPDATA%\UsageRings\update.log`.
+
+To see what would start without starting anything:
+
+```powershell
+.venv\Scripts\python.exe scripts\start_with_update.py --no-update --dry-run
+```
+
+Shortcuts from the earlier separate Claude and Codex repositories still work if
+their target scripts exist, but **Usage Rings** replaces them; delete the old
+ones (including **Start Codex and Claude Usage Widgets**) once setup has
+created the new shortcut.
 
 ## Usage
 
-Run the app directly while developing:
+Run one widget directly while developing:
 
 ```powershell
-python scripts\launch_usage_rings.py
-```
-
-Show it immediately for a manual check:
-
-```powershell
-python scripts\launch_usage_rings.py --start-visible
+python scripts\launch_usage_rings.py --provider claude
+python scripts\launch_usage_rings.py --provider codex --start-visible
 ```
 
 After installation, the equivalent command is:
 
 ```powershell
-claude-code-usage-rings
+usage-rings --provider claude
 ```
 
 Optional arguments:
 
 ```text
+--provider claude|codex     Which service to show (required)
 --auth-file PATH
 --base-url URL
 --refresh-seconds SECONDS
@@ -147,84 +164,120 @@ Optional arguments:
   saved for the next launch.
 - Press `Ctrl+Q` while a widget is focused, or choose **Quit usage rings** from
   its tray menu, to close that widget. Quitting also stops its watchdog, so it
-  stays closed until the next sign-in or until you start it again.
-- The widget stays off the Windows taskbar like the Codex sibling and keeps a
-  live rings icon in the notification area. Click the tray icon or right-click
-  it for controls.
+  stays closed until you start it again (for example with the **Usage Rings**
+  shortcut). The other widget keeps running.
+- Each widget stays off the Windows taskbar and keeps a live rings icon in the
+  notification area. Click the tray icon or right-click it for controls.
 - Hover over the window for full reset details when using the two smallest
   sizes.
 - The header status badge shows `LIVE`, `SYNCING`, or `ERROR`, and appends
   the time of the last successful refresh (for example `LIVE · 14:32`) once
   usage data has loaded.
-- Temporary Claude service throttles (`HTTP 429`) are retried with the
-  server's `Retry-After` value when provided. If the widget already has data,
-  it keeps the last successful rings visible and shows `SYNCING` until the
-  next refresh succeeds. With no usage data yet, a failed refresh always shows
-  `ERROR` with the reason instead of `SYNCING`, so the widget never looks busy
-  when it has actually given up.
+- Temporary service throttles (`HTTP 429`) are retried with the server's
+  `Retry-After` value when provided. If the widget already has data, it keeps
+  the last successful rings visible and shows `SYNCING` until the next refresh
+  succeeds. With no usage data yet, a failed refresh always shows `ERROR` with
+  the reason instead of `SYNCING`, so the widget never looks busy when it has
+  actually given up.
 - Repeated failures back the refresh off exponentially, from the normal
   interval up to 15 minutes, and reset on the first success.
-- Every refresh failure is written to
-  `%LOCALAPPDATA%\ClaudeCodeUsageRings\usage.log` (override with
-  `--log-file`).
+- Every refresh failure is written to a per-widget log (override with
+  `--log-file`):
+  `%LOCALAPPDATA%\ClaudeCodeUsageRings\usage.log` for Claude and
+  `%LOCALAPPDATA%\CodexUsageRings\usage.log` for Codex. The watchdog writes
+  `watchdog.log` in the same folder.
 
 ## Troubleshooting
 
-If the badge does not reach `LIVE`, run one refresh in the foreground:
+If a badge does not reach `LIVE`, run one refresh in the foreground for that
+widget:
 
 ```powershell
-.venv\Scripts\python.exe scripts\launch_usage_rings.py --diagnose
+.venv\Scripts\python.exe scripts\launch_usage_rings.py --provider claude --diagnose
+.venv\Scripts\python.exe scripts\launch_usage_rings.py --provider codex --diagnose
 ```
 
 It prints the credentials path, the raw usage response, and the parsed
-windows, or the exact failure. If Claude still rejects the sign-in after
-Claude Code has tried to renew it, run `claude auth login --claudeai`;
-`HTTP 429` means Claude is throttling the account and the widget will retry
-with backoff.
-
-The widget never renews the OAuth token or writes the credentials file
-itself, because the token endpoint refuses renewals that do not come from
-Claude Code. When a usage request is rejected, the widget runs Claude Code's
-local `claude -p /usage` command (no model call, so no usage cost), which
-renews the sign-in the way Claude Code normally would, then reads the file
-again. It asks at most once every 10 minutes. The CLI is found on `PATH`, in
-the Claude desktop app's bundled copy, or at `CLAUDE_USAGE_CLI`.
+windows, or the exact failure.
 
 Losing the network is not treated as a sign-in problem: offline refreshes
 retry every 30 seconds, keep the last rings on screen, and never trigger a
 renewal.
 
-## Claude lifecycle detection
+A widget does not appear at startup: confirm it is enabled by looking at
+`%LOCALAPPDATA%\UsageRings\config.json` (or re-run setup), check
+`%LOCALAPPDATA%\UsageRings\update.log` and the widget's `watchdog.log`, and
+remember the widget stays hidden until its desktop app is open and not
+minimized.
 
-On Windows, the app checks the current Claude desktop process and the
-packaged application frame. It polls twice per second so the rings follow
-open, minimized, and closed Claude states without a second manual launch. If
-Claude Code is running as a console/background process with no detectable
-top-level window, the widget stays visible because the window state is
-ambiguous rather than treating Claude as closed.
+### Claude
+
+If Claude still rejects the sign-in after Claude Code has tried to renew it,
+run `claude auth login --claudeai`; `HTTP 429` means Claude is throttling the
+account and the widget will retry with backoff. "Credentials do not contain
+claudeAiOauth.accessToken" means Claude Code is signed out.
+
+The widget never renews the OAuth token or writes the credentials file itself,
+because the token endpoint refuses renewals that do not come from Claude Code.
+When a usage request is rejected, the widget runs Claude Code's local
+`claude -p /usage` command (no model call, so no usage cost), which renews the
+sign-in the way Claude Code normally would, then reads the file again. It asks
+at most once every 10 minutes. The CLI is found on `PATH`, in the Claude
+desktop app's bundled copy, or at `CLAUDE_USAGE_CLI`.
+
+### Codex
+
+If Codex still rejects the sign-in after it tried to renew it, run
+`codex login`.
+
+The widget only reads `auth.json`; it never renews or rewrites it. The Codex
+app holds the same refresh token and OpenAI rotates it on every renewal, so a
+renewal by the widget could sign Codex out. When a usage request is rejected,
+the widget instead asks Codex's own app server for the account with a token
+refresh (`codex app-server`, `account/read` with `refreshToken: true`), which
+makes no model call, then reads the file again. It asks at most once every 10
+minutes. The CLI is found on `PATH`, in the Codex app's install folder, or at
+`CODEX_USAGE_CLI`.
+
+## Lifecycle detection
+
+On Windows, each widget checks its desktop app's processes and packaged
+application frame. It polls twice per second so the rings follow open,
+minimized, and closed states without a second manual launch.
+
+- **Claude** matches `Claude.exe`. If Claude Code is running as a
+  console/background process with no detectable top-level window, the widget
+  stays visible because the window state is ambiguous rather than treating
+  Claude as closed.
+- **Codex** matches `ChatGPT.exe` (the current desktop shell) and `codex.exe`.
+  A background `codex.exe` helper can outlive the shell, so a matching
+  top-level window is required: closing Codex hides the rings and opening it
+  brings them back.
 
 ## Authentication and data
 
-The app reads Claude Code's local OAuth credentials file:
+Each widget reads the local credentials file its CLI maintains:
 
 ```text
-~/.claude/.credentials.json
+~/.claude/.credentials.json     (Claude)
+~/.codex/auth.json              (Codex)
 ```
 
-It extracts the access token and account ID as needed, then requests usage
-from a placeholder endpoint modeled on the Codex sibling project:
+and requests usage from the same routes those tools use for their meters:
 
 ```http
-GET https://api.anthropic.com/api/oauth/usage
+GET https://api.anthropic.com/api/oauth/usage            (Claude)
 Authorization: Bearer <access_token>
 anthropic-beta: oauth-2025-04-20
-Accept: application/json
+
+GET https://chatgpt.com/backend-api/wham/usage           (Codex)
+Authorization: Bearer <access_token>
+chatgpt-account-id: <account_id>
 ```
 
-The OAuth usage route is the same endpoint Claude Code uses for the 5-hour and
-weekly subscription meters. Credentials stay local and are sent only with
-that usage request. The widget only reads the credentials file; renewing it
-is left to Claude Code.
+The endpoints may change without notice. Credentials stay local and are sent
+only with the usage request for their own service. The widgets only read the
+credential files; renewing them is left to Claude Code and Codex.
 
 ## Privacy and repository hygiene
 
@@ -235,12 +288,23 @@ paths. Local credential and environment files are ignored by `.gitignore`.
 ## Project structure
 
 ```text
-scripts/launch_usage_rings.py                       Development launcher
-scripts/claude_code_usage_rings_watchdog.py          Startup supervisor
-scripts/start_with_update.py                        Startup entry: update, then supervise
-src/claude_code_usage_rings/app.py                   Application entry point
-src/claude_code_usage_rings/host_window.py           Claude process/window detection
-src/claude_code_usage_rings/account_usage.py         Authentication and usage fetching
-src/claude_code_usage_rings/models.py                Usage formatting
-src/claude_code_usage_rings/rings_window.py           PyQt6 window and ring rendering
+scripts/setup.py                       First-run setup (also: usage-rings setup)
+scripts/start_with_update.py           Startup entry: update, then supervise enabled widgets
+scripts/usage_rings_watchdog.py        Per-provider supervisor (--provider)
+scripts/launch_usage_rings.py          Development launcher
+src/usage_rings/app.py                 Application entry point (--provider)
+src/usage_rings/cli.py                 `usage-rings` command and `setup` subcommand
+src/usage_rings/config.py              config.json location and loading
+src/usage_rings/setup.py               Setup flow and shortcut creation
+src/usage_rings/usage.py               Shared usage types, HTTP and renewal plumbing
+src/usage_rings/providers/             One module per service (claude.py, codex.py)
+src/usage_rings/host_window.py         Host app process/window detection
+src/usage_rings/single_instance.py     Named-mutex helpers
+src/usage_rings/models.py              Usage formatting
+src/usage_rings/rings_window.py        PyQt6 window and ring rendering
+src/usage_rings/window_snap.py         Cross-process window snapping
 ```
+
+Adding another service means adding a module in `providers/` that fills in a
+`Provider` (credentials path, usage fetch and parse, host window, mutex names)
+and registering it in `providers/__init__.py`.
