@@ -196,11 +196,14 @@ class UsageRingsWindow(QtWidgets.QWidget):
                 )
 
     def _move_dragged_window(self, desired: QtCore.QPoint) -> None:
-        own_hwnd = int(self.winId())
         if self._snap_peer_hwnd is not None and self._snap_peer_offset is not None:
             peer_rect = get_window_rect(self._snap_peer_hwnd)
             if peer_rect is not None and windows_are_connected(self._current_window_rect(), peer_rect):
-                move_window(own_hwnd, desired.x(), desired.y())
+                # Qt's global mouse positions and QWidget.move() share the
+                # same logical coordinate space. Keep the dragged window on
+                # that path; the peer still needs Win32 movement because it
+                # belongs to the other widget process.
+                self.move(desired)
                 move_window(
                     self._snap_peer_hwnd,
                     desired.x() + self._snap_peer_offset.x(),
@@ -211,7 +214,7 @@ class UsageRingsWindow(QtWidgets.QWidget):
 
         # Do not snap while dragging. This lets the user pass through a
         # candidate zone and choose whether to snap by where they release.
-        move_window(own_hwnd, desired.x(), desired.y())
+        self.move(desired)
 
     def _snap_on_release(self, desired: QtCore.QPoint) -> None:
         if self._snap_peer_hwnd is not None:
@@ -233,7 +236,7 @@ class UsageRingsWindow(QtWidgets.QWidget):
         if peer_rect is None:
             return
 
-        move_window(own_hwnd, candidate.x, candidate.y)
+        self.move(candidate.x, candidate.y)
         self._snap_peer_hwnd = candidate.peer_hwnd
         self._snap_peer_offset = QtCore.QPoint(
             peer_rect[0] - candidate.x,
